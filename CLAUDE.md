@@ -28,5 +28,5 @@ plugin and a sink) and the app that wires them together live elsewhere.
 - Elixir `~> 1.20`, OTP 29. `claude_wrapper` is a Hex dependency.
 - Run `mix format`, `mix compile --warnings-as-errors`, and `mix test` before every push; CI runs the same.
 - The `:live`-tagged test makes a real, paid claude call and is excluded by default. Run it with `mix test --only live`.
-- `dev/playground.exs` and `dev/propose_dispose.exs` run the worker offline on a throwaway SQLite-backed Oban: `mix run dev/<script>.exs`.
+- `examples/playground.exs` and `examples/propose_dispose.exs` run the worker offline on a throwaway SQLite-backed Oban: `mix run examples/<script>.exs`.
 - Feature branch + draft PR for changes; conventional-commit messages; no AI-attribution trailers in commits or PRs.

@@ -16,7 +16,11 @@ defmodule ObanClaude.MixProject do
       package: package(),
       name: "oban_claude",
       source_url: @source_url,
-      docs: [main: "ObanClaude", source_ref: "v#{@version}"]
+      docs: [
+        main: "ObanClaude",
+        source_ref: "v#{@version}",
+        extras: ["README.md", "CHANGELOG.md"]
+      ]
     ]
   end
 
