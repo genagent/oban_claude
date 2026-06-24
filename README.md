@@ -1,5 +1,7 @@
 # oban_claude
 
+[![CI](https://github.com/genagent/oban_claude/actions/workflows/ci.yml/badge.svg)](https://github.com/genagent/oban_claude/actions/workflows/ci.yml)
+
 Run [Claude Code](https://github.com/anthropics/claude-code) jobs on an
 [Oban](https://hex.pm/packages/oban) queue. A thin worker over
 [`claude_wrapper`](https://hex.pm/packages/claude_wrapper) that maps claude's

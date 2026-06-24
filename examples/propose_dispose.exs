@@ -1,10 +1,10 @@
-# dev/propose_dispose.exs
+# examples/propose_dispose.exs
 #
 # Shows the shape the autonomous issue/PR worker is built around: "propose /
 # dispose". A claude worker (queue :claude) runs with a JSON schema, gets back
 # a typed outcome, and *disposes* by enqueuing a follow-on effector job on a
 # second queue (:sink) -- the stand-in for the future, separate `oban_github`
-# sink. oban_claude stays GitHub-agnostic; the sink is just another Oban worker.
+# sink. The sink is just another Oban worker; oban_claude does not know of it.
 #
 # Two Oban patterns on display: multiple queues, and a worker enqueuing a
 # follow-on job.
@@ -14,11 +14,11 @@
 # `ClaudeWrapper.Structured.run/3`; the {:ok, parsed, result} it returns adapts
 # to this seam as `{:ok, _parsed, result} -> {:ok, result}`.
 #
-#   mix run dev/propose_dispose.exs
+#   mix run examples/propose_dispose.exs
 
 import Ecto.Query, only: [from: 2]
 
-# --- Boot (same throwaway-SQLite setup as dev/playground.exs) ---------------
+# --- Boot (same throwaway-SQLite setup as examples/playground.exs) ----------
 db_path = Path.join(System.tmp_dir!(), "oban_claude_propose_dispose.db")
 for suffix <- ["", "-shm", "-wal"], do: File.rm(db_path <> suffix)
 

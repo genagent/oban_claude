@@ -1,4 +1,4 @@
-# dev/playground.exs
+# examples/playground.exs
 #
 # An offline, deterministic look at oban_claude running on a *real* Oban queue.
 #
@@ -8,7 +8,7 @@
 # via the worker's `:query_fun` seam. So this exercises the genuine path:
 # perform/1 -> ObanClaude.run/2 -> build/1 -> classify -> handle_result/2.
 #
-#   mix run dev/playground.exs
+#   mix run examples/playground.exs
 
 import Ecto.Query, only: [from: 2]
 
