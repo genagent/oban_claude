@@ -34,6 +34,13 @@ defmodule ObanClaudeTest do
       e = %Error{kind: :command_failed}
       assert {{:error, :command_failed}, ^e} = Outcome.classify({:error, e})
     end
+
+    test "an off-contract (non-Error) error cancels rather than retries" do
+      assert {{:cancel, :weird}, :weird} = Outcome.classify({:error, :weird})
+
+      assert {{:cancel, {:unexpected_shape, _}}, _} =
+               Outcome.classify({:error, {:unexpected_shape, %{}}})
+    end
   end
 
   describe "run/2" do
