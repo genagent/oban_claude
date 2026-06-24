@@ -2,7 +2,7 @@ defmodule ObanClaude.MixProject do
   use Mix.Project
 
   @version "0.1.0"
-  @source_url "https://github.com/joshrotenberg/oban_claude"
+  @source_url "https://github.com/genagent/oban_claude"
 
   def project do
     [
