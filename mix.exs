@@ -1,0 +1,47 @@
+defmodule ObanClaude.MixProject do
+  use Mix.Project
+
+  @version "0.1.0"
+  @source_url "https://github.com/joshrotenberg/oban_claude"
+
+  def project do
+    [
+      app: :oban_claude,
+      version: @version,
+      elixir: "~> 1.20",
+      start_permanent: Mix.env() == :prod,
+      deps: deps(),
+      description:
+        "Run Claude Code jobs on an Oban queue: an Oban.Worker over claude_wrapper that maps claude's typed result/error onto Oban return values.",
+      package: package(),
+      name: "oban_claude",
+      source_url: @source_url,
+      docs: [main: "ObanClaude", source_ref: "v#{@version}"]
+    ]
+  end
+
+  def application do
+    [extra_applications: [:logger]]
+  end
+
+  defp deps do
+    [
+      {:oban, "~> 2.23"},
+      # The seam onto `claude -p` (typed Result/Error). Path while iterating
+      # against in-flight fixes; pin to Hex once claude_wrapper is released.
+      {:claude_wrapper, path: "../../genagent/claude_wrapper_ex"},
+      {:telemetry, "~> 1.2"},
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      # Dev/test only: backs the SQLite (Lite) Oban engine used by the
+      # dev/playground.exs harness. Never a runtime dep of the library.
+      {:ecto_sqlite3, "~> 0.17", only: [:dev, :test]}
+    ]
+  end
+
+  defp package do
+    [
+      licenses: ["MIT"],
+      links: %{"GitHub" => @source_url}
+    ]
+  end
+end
