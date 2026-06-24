@@ -55,6 +55,31 @@ In `handle_result/2`, `ObanClaude.outcome/1` reads the `"outcome"` key of a
 `--json-schema` run's structured output; `ObanClaude.structured/1` returns the
 whole validated object.
 
+## Workers as task definitions
+
+A worker is a task type; a job is one instance. `:args` on the worker are default
+claude args, merged under each job's args (the job wins). That gives a spectrum:
+
+```elixir
+# fixed config in the worker, the variable input in the job
+defmodule MyApp.PrReview do
+  use ObanClaude.Worker,
+    queue: :review,
+    args: %{"model" => "sonnet", "system_prompt" => "Review the pull request."}
+end
+
+MyApp.PrReview.new(%{"prompt" => "PR #4321: " <> diff}) |> Oban.insert()
+```
+
+With no `:args`, a worker is a bare passthrough (the job carries everything). With
+everything in `:args` and an empty job it is a routine: pair it with
+`Oban.Plugins.Cron` for a scheduled claude task.
+
+```elixir
+config :my_app, Oban,
+  plugins: [{Oban.Plugins.Cron, crontab: [{"0 9 * * *", MyApp.DailyDigest}]}]
+```
+
 ## The classifier
 
 `oban_claude` maps each claude outcome onto the right Oban verdict (overridable

@@ -17,6 +17,10 @@ Initial release.
   value. Options `:classifier` and `:query_fun`.
 - `ObanClaude.Worker`: a `use`-able `Oban.Worker` with a single `handle_result/2`
   override point.
+- `use ObanClaude.Worker, args: %{...}`: worker-level default claude args, merged
+  under each job's args (the job wins). A bare worker is a passthrough; a fully
+  preconfigured worker with an empty job is a routine (pair with
+  `Oban.Plugins.Cron`).
 - `ObanClaude.Outcome.classify/1`: the default, overridable outcome to
   Oban-return mapping, including a catch-all that cancels off-contract errors.
 - `ObanClaude.outcome/1` and `ObanClaude.structured/1`: read the structured

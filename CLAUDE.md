@@ -9,7 +9,7 @@ Lifeline, Pruner); claude_wrapper owns running claude.
 ## Surface
 
 - `ObanClaude.run/2` -- the engine: a string-keyed args map in, `{oban_return, result}` out. Options: `:classifier` and `:query_fun`.
-- `ObanClaude.Worker` -- `use ObanClaude.Worker, <oban opts>`; the one override point is `handle_result/2`.
+- `ObanClaude.Worker` -- `use ObanClaude.Worker, <oban opts>`; `:args` are default claude args merged under each job's args (the job wins), and `handle_result/2` is the override point.
 - `ObanClaude.Outcome.classify/1` -- the default, overridable outcome -> Oban-return mapping.
 - `ObanClaude.outcome/1` and `structured/1` -- read structured output from a `--json-schema` run.
 
