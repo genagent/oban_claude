@@ -20,6 +20,12 @@ defmodule ObanClaude.Outcome do
   app-dependent ones -- an app whose worker resumes via a pinned `--session-id`
   may prefer `{:snooze, n}` or `{:error, ...}` there. That is exactly what the
   `:classifier` override is for.
+
+  An `{:error, term}` that is not a typed `%Error{}` (off the documented
+  contract, e.g. a custom `:query_fun` routing through
+  `ClaudeWrapper.Structured.run/3`, whose `parse/1` and `Jason` paths return
+  non-`Error` terms) is cancelled rather than retried: an unclassifiable
+  failure should not be blindly re-run.
   """
 
   alias ClaudeWrapper.{Error, Result}
@@ -27,8 +33,8 @@ defmodule ObanClaude.Outcome do
   @snooze_seconds 30
 
   @doc "Map `ClaudeWrapper.query/2`'s return onto `{oban_return, term}`."
-  @spec classify({:ok, Result.t()} | {:error, Error.t()}) ::
-          {ObanClaude.oban_return(), Result.t() | Error.t()}
+  @spec classify({:ok, Result.t()} | {:error, term()}) ::
+          {ObanClaude.oban_return(), Result.t() | term()}
   def classify({:ok, %Result{is_error: false} = result}), do: {:ok, result}
 
   def classify({:ok, %Result{is_error: true} = result}), do: {{:error, :result_error}, result}
@@ -40,4 +46,9 @@ defmodule ObanClaude.Outcome do
       do: {{:cancel, kind}, error}
 
   def classify({:error, %Error{kind: kind} = error}), do: {{:error, kind}, error}
+
+  # Off-contract: an error term that is not a typed %Error{} (e.g. a Structured
+  # parse/Jason failure routed in via :query_fun). Cancel rather than retry
+  # something we cannot classify.
+  def classify({:error, other}), do: {{:cancel, other}, other}
 end
