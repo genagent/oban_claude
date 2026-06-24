@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.1.0]
+## [0.1.0] - 2026-06-24
 
 Initial release.
 
@@ -26,3 +26,6 @@ Initial release.
 - `ObanClaude.outcome/1` and `ObanClaude.structured/1`: read the structured
   output of a `--json-schema` run.
 - `[:oban_claude, :run, :stop]` and `[:oban_claude, :run, :exception]` telemetry.
+
+[Unreleased]: https://github.com/genagent/oban_claude/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/genagent/oban_claude/releases/tag/v0.1.0

@@ -109,4 +109,5 @@ structured data for a downstream effector is the *job's* concern, encoded in the
 prompt and permission mode. Persisting results and reacting to completion are the
 caller's job (`handle_result/2` + the `[:oban_claude, :run, :stop]` telemetry).
 
-See [SPEC.md](SPEC.md) for the design and the build-out checklist.
+See [SPEC.md](https://github.com/genagent/oban_claude/blob/main/SPEC.md) for the
+design and the build-out checklist.
