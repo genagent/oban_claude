@@ -1,7 +1,7 @@
 # oban_claude
 
 Run [Claude Code](https://github.com/anthropics/claude-code) jobs on an
-[Oban](https://hex.pm/packages/oban) queue. A thin, GitHub-agnostic worker over
+[Oban](https://hex.pm/packages/oban) queue. A thin worker over
 [`claude_wrapper`](https://hex.pm/packages/claude_wrapper) that maps claude's
 typed result/error onto Oban's return values.
 
@@ -46,7 +46,12 @@ end
 
 The job args are the spec: `prompt` (required) plus any `claude_wrapper` query
 option (`model`, `max_turns`, `max_budget_usd`, `working_dir`, `permission_mode`,
-`timeout`, ...).
+`timeout`, ...). Args are JSON, so atom-valued options are given as strings:
+`permission_mode` is `"bypass_permissions"`, coerced to the atom for you.
+
+In `handle_result/2`, `ObanClaude.outcome/1` reads the `"outcome"` key of a
+`--json-schema` run's structured output; `ObanClaude.structured/1` returns the
+whole validated object.
 
 ## The classifier
 
@@ -62,9 +67,16 @@ via `:classifier`):
 | `:auth` / `:binary_not_found` | `{:cancel, ...}` | global/env problem; retrying cannot help |
 | `:budget_exceeded` / `:max_turns_exceeded` | `{:cancel, ...}` | the rails stopped it; resume/re-scope is deliberate |
 
+## Testing
+
+`ObanClaude.run/2` and `use ObanClaude.Worker` accept a `:query_fun` (default
+`&ClaudeWrapper.query/2`): a `(prompt, query_opts)` function returning
+`{:ok, %Result{}}` / `{:error, %Error{}}`. Override it to stub claude in tests
+without a live call, or to route through a different `claude_wrapper` entrypoint.
+
 ## What it does NOT do
 
-No GitHub, no state, no daemon, no "sink". It runs the agent and returns the
+No state, no daemon, no "sink". It runs the agent and returns the
 verdict. Whether the agent effects its own writes (full-auto) or returns
 structured data for a downstream effector is the *job's* concern, encoded in the
 prompt and permission mode. Persisting results and reacting to completion are the

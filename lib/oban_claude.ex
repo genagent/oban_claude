@@ -3,7 +3,7 @@ defmodule ObanClaude do
   Run a Claude Code job (via [`claude_wrapper`](https://hex.pm/packages/claude_wrapper))
   on an Oban queue.
 
-  `oban_claude` is the thin, GitHub-agnostic seam between Oban and claude:
+  `oban_claude` is the thin seam between Oban and claude:
 
     * `run/2` is the engine: a string-keyed args map in, a `{oban_return, result}`
       tuple out. It calls `ClaudeWrapper.query/2` and maps the typed
@@ -12,10 +12,10 @@ defmodule ObanClaude do
     * `ObanClaude.Worker` is the drop-in worker (`use ObanClaude.Worker`) with a
       single `c:ObanClaude.Worker.handle_result/2` override point.
 
-  It knows nothing about GitHub, owns no state, and runs no daemon. Whether the
-  agent effects its own writes (full-auto) or returns structured data for a
-  downstream effector is encoded in the *job's* args (prompt + permission mode),
-  never here -- so `oban_claude` supports both models without taking a position.
+  It owns no state and runs no daemon, and takes no position on what consumes a
+  result. Whether the agent effects its own writes (full-auto) or returns
+  structured data for a downstream effector is encoded in the *job's* args
+  (prompt + permission mode), never here, so `oban_claude` supports both.
 
   ## Example
 
