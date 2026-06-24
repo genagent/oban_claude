@@ -27,9 +27,8 @@ defmodule ObanClaude.MixProject do
   defp deps do
     [
       {:oban, "~> 2.23"},
-      # The seam onto `claude -p` (typed Result/Error). Path while iterating
-      # against in-flight fixes; pin to Hex once claude_wrapper is released.
-      {:claude_wrapper, path: "../../genagent/claude_wrapper_ex"},
+      # The seam onto `claude -p`: a typed Result/Error and query/2.
+      {:claude_wrapper, "~> 0.10.0"},
       {:telemetry, "~> 1.2"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       # Dev/test only: backs the SQLite (Lite) Oban engine used by the
