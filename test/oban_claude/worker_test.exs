@@ -18,6 +18,11 @@ defmodule ObanClaude.WorkerTest do
 
   def query_auth(_prompt, _opts), do: {:error, %Error{kind: :auth}}
 
+  # Encodes the prompt and query opts run/2 produced into the result, so a test
+  # can inspect what the worker merged and passed through.
+  def echo(prompt, opts),
+    do: {:ok, %Result{result: inspect({prompt, Enum.sort(opts)}), is_error: false}}
+
   defmodule DefaultWorker do
     use ObanClaude.Worker, queue: :test, query_fun: &ObanClaude.WorkerTest.query_ok/2
   end
@@ -38,6 +43,26 @@ defmodule ObanClaude.WorkerTest do
     use ObanClaude.Worker, queue: :test, query_fun: &ObanClaude.WorkerTest.query_auth/2
   end
 
+  defmodule MergeWorker do
+    use ObanClaude.Worker,
+      queue: :test,
+      query_fun: &ObanClaude.WorkerTest.echo/2,
+      args: %{"model" => "haiku", "system_prompt" => "fixed"}
+
+    @impl ObanClaude.Worker
+    def handle_result(result, _job), do: {:ok, result.result}
+  end
+
+  defmodule RoutineWorker do
+    use ObanClaude.Worker,
+      queue: :test,
+      query_fun: &ObanClaude.WorkerTest.echo/2,
+      args: %{"prompt" => "standing task", "model" => "haiku"}
+
+    @impl ObanClaude.Worker
+    def handle_result(result, _job), do: {:ok, result.result}
+  end
+
   defp job(args), do: %Oban.Job{args: args}
 
   test "the default handle_result/2 returns :ok on a clean result" do
@@ -50,5 +75,20 @@ defmodule ObanClaude.WorkerTest do
 
   test "a claude error passes the classifier verdict straight through to Oban" do
     assert {:cancel, :auth} = AuthWorker.perform(job(%{"prompt" => "x"}))
+  end
+
+  test "worker :args defaults merge under job args (job wins on conflicts)" do
+    {:ok, captured} = MergeWorker.perform(job(%{"prompt" => "hi", "model" => "sonnet"}))
+
+    assert captured =~ ~s("hi")
+    assert captured =~ ~s(model: "sonnet")
+    assert captured =~ ~s(system_prompt: "fixed")
+  end
+
+  test "a fully preconfigured worker runs its task from an empty job (routine)" do
+    {:ok, captured} = RoutineWorker.perform(job(%{}))
+
+    assert captured =~ ~s("standing task")
+    assert captured =~ ~s(model: "haiku")
   end
 end
