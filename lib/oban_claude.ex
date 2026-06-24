@@ -26,11 +26,39 @@ defmodule ObanClaude do
       %{"prompt" => "summarize the repo", "working_dir" => "/path/to/repo"}
       |> MyApp.ClaudeJob.new()
       |> Oban.insert()
+
+  ## Telemetry
+
+  `run/2` emits the following events via `:telemetry`:
+
+  ### `[:oban_claude, :run, :stop]`
+
+  Emitted after a successful `ClaudeWrapper.query/2` call. This includes
+  `is_error: true` results, which are returned without raising.
+
+    * Measurements:
+      * `:duration` -- wall time of the query in native time units (convert with
+        `System.convert_time_unit/3`)
+      * `:cost_usd` -- the reported cost in USD from the result (`0.0` when the
+        result carries no cost)
+    * Metadata:
+      * `:result` -- the `%ClaudeWrapper.Result{}` struct
+      * `:args` -- the string-keyed args map passed to `run/2`
+
+  ### `[:oban_claude, :run, :exception]`
+
+  Emitted when `ClaudeWrapper.query/2` returns `{:error, %ClaudeWrapper.Error{}}`.
+
+    * Measurements:
+      * `:duration` -- wall time of the query in native time units
+    * Metadata:
+      * `:error` -- the `%ClaudeWrapper.Error{}` struct
+      * `:args` -- the string-keyed args map passed to `run/2`
   """
 
   alias ClaudeWrapper.{Error, Result}
 
-  @typedoc "An `Oban.Worker.perform/1` return value."
+  @typedoc "An `c:Oban.Worker.perform/1` return value."
   @type oban_return ::
           :ok | {:ok, term} | {:error, term} | {:cancel, term} | {:snooze, pos_integer}
 
@@ -70,7 +98,7 @@ defmodule ObanClaude do
       to `&ClaudeWrapper.query/2`. Override to stub claude in tests, or to route
       through a different wrapper entrypoint.
   """
-  @spec run(map, keyword) :: {oban_return, Result.t() | Error.t()}
+  @spec run(map, keyword) :: {oban_return, Result.t() | Error.t() | term()}
   def run(args, opts \\ []) when is_map(args) do
     classifier = Keyword.get(opts, :classifier, &ObanClaude.Outcome.classify/1)
     query_fun = Keyword.get(opts, :query_fun, &ClaudeWrapper.query/2)
