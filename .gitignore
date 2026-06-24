@@ -22,3 +22,6 @@ erl_crash.dump
 # Ignore package tarball (built via "mix hex.build").
 oban_claude-*.tar
 
+# Track this repo's CLAUDE.md despite a global ignore (this project is about Claude).
+!CLAUDE.md
+
