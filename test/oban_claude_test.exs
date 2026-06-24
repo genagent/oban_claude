@@ -4,9 +4,6 @@ defmodule ObanClaudeTest do
   alias ClaudeWrapper.{Error, Result}
   alias ObanClaude.Outcome
 
-  # NOTE: confirm the %Result{}/%Error{} field names against the installed
-  # claude_wrapper before relying on these fixtures. See SPEC.md "Build-out".
-
   describe "Outcome.classify/1" do
     test "a clean result succeeds" do
       r = %Result{result: "hi", is_error: false}
@@ -30,9 +27,11 @@ defmodule ObanClaudeTest do
       end
     end
 
-    test "other errors retry" do
-      e = %Error{kind: :command_failed}
-      assert {{:error, :command_failed}, ^e} = Outcome.classify({:error, e})
+    test "command-failed / json / io errors retry" do
+      for kind <- [:command_failed, :json, :io] do
+        e = %Error{kind: kind}
+        assert {{:error, ^kind}, ^e} = Outcome.classify({:error, e})
+      end
     end
 
     test "an off-contract (non-Error) error cancels rather than retries" do
