@@ -93,7 +93,7 @@ defmodule TriageJob do
     query_fun: &__MODULE__.query/2,
     args: %{
       "model" => "haiku",
-      "max_turns" => 1,
+      "max_turns" => 3,
       "system_prompt" => @system_prompt,
       "json_schema" => @schema_json
     }
@@ -107,6 +107,21 @@ defmodule TriageJob do
       ClaudeWrapper.query(prompt, opts)
     else
       stub(prompt)
+    end
+  end
+
+  # handle_result/2 only runs on a successful claude call. Wrap perform/1 (it is
+  # overridable) so a failed call surfaces its Oban verdict instead of the worker
+  # going silent. A real sink would route these to a dead-letter or alert path.
+  @impl Oban.Worker
+  def perform(%Oban.Job{args: %{"number" => number}} = job) do
+    case super(job) do
+      :ok ->
+        :ok
+
+      other ->
+        IO.puts("  ##{number} no verdict (claude call failed): #{inspect(other)}")
+        other
     end
   end
 
@@ -218,18 +233,29 @@ for %{"number" => number, "title" => title} = issue <- issues do
 end
 
 # --- Wait for the queue to settle -------------------------------------------
+# Real claude calls take seconds each; the stub is instant. Give live mode a
+# real budget so the script does not exit (killing in-flight calls) before the
+# jobs reach handle_result/2.
 terminal = ~w(completed cancelled discarded)
+total = length(issues)
+deadline_ms = if live?, do: 180_000, else: 10_000
+poll_ms = 500
 
-settled? = fn ->
-  states =
-    TriageRepo.all(from(j in "oban_jobs", select: j.state))
-
-  states != [] and Enum.all?(states, &(&1 in terminal))
+count_done = fn ->
+  TriageRepo.all(from(j in "oban_jobs", select: j.state))
+  |> Enum.count(&(&1 in terminal))
 end
 
-Enum.reduce_while(1..50, nil, fn _, _ ->
-  Process.sleep(200)
-  if settled?.(), do: {:halt, :done}, else: {:cont, nil}
-end)
+settled =
+  Enum.reduce_while(1..div(deadline_ms, poll_ms), 0, fn i, _ ->
+    Process.sleep(poll_ms)
+    done = count_done.()
+    if live? and rem(i, 10) == 0 and done < total, do: IO.puts("  ...waiting (#{done}/#{total})")
+    if done >= total, do: {:halt, done}, else: {:cont, done}
+  end)
+
+if settled < total do
+  IO.puts("\n#{settled}/#{total} jobs settled before the #{div(deadline_ms, 1000)}s deadline.")
+end
 
 IO.puts("\nDone. Verdicts above are advisory only; nothing was written to GitHub.")

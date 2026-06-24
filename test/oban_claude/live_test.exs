@@ -5,7 +5,7 @@ defmodule ObanClaude.LiveTest.EchoWorker do
   use ObanClaude.Worker,
     queue: :live_test,
     max_attempts: 1,
-    args: %{"model" => "haiku", "max_turns" => 1}
+    args: %{"model" => "haiku", "max_turns" => 3}
 
   @impl ObanClaude.Worker
   def handle_result(result, _job), do: {:cancel, {:handled, result.is_error}}
@@ -64,7 +64,7 @@ defmodule ObanClaude.LiveTest do
     args = %{
       "prompt" => "Set outcome to done.",
       "model" => "haiku",
-      "max_turns" => 1,
+      "max_turns" => 3,
       "json_schema" => schema
     }
 
