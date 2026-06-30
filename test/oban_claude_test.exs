@@ -20,8 +20,21 @@ defmodule ObanClaudeTest do
       assert {{:snooze, _}, ^e} = Outcome.classify({:error, e})
     end
 
-    test "auth / budget / max-turns / missing-binary cancel (no blind retry)" do
-      for kind <- [:auth, :binary_not_found, :budget_exceeded, :max_turns_exceeded] do
+    test "config/env faults and rail-stops cancel (no blind retry)" do
+      cancels = [
+        # config/env faults: re-fail identically on every attempt
+        :auth,
+        :binary_not_found,
+        :version_mismatch,
+        :invalid_version,
+        :dangerous_not_allowed,
+        :invalid_tool_pattern,
+        # rail-stops: the rails deliberately halted the run
+        :budget_exceeded,
+        :max_turns_exceeded
+      ]
+
+      for kind <- cancels do
         e = %Error{kind: kind}
         assert {{:cancel, ^kind}, ^e} = Outcome.classify({:error, e})
       end
@@ -123,6 +136,70 @@ defmodule ObanClaudeTest do
       assert_raise KeyError, fn ->
         ObanClaude.run(%{}, query_fun: fn _p, _o -> {:ok, %Result{is_error: false}} end)
       end
+    end
+  end
+
+  # A remote (named) handler -- avoids telemetry's local-function perf warning.
+  def forward_event(name, measurements, metadata, pid),
+    do: send(pid, {:telemetry, name, measurements, metadata})
+
+  describe "telemetry" do
+    setup do
+      pid = self()
+
+      attach = fn event, handler_id ->
+        :telemetry.attach(handler_id, event, &__MODULE__.forward_event/4, pid)
+        on_exit(fn -> :telemetry.detach(handler_id) end)
+      end
+
+      {:ok, attach: attach}
+    end
+
+    test "emits :stop with duration/cost_usd and result/args on success", %{attach: attach} do
+      attach.([:oban_claude, :run, :stop], "oc-stop")
+      result = %Result{result: "hi", is_error: false, cost_usd: 0.0012}
+      args = %{"prompt" => "x", "model" => "haiku"}
+
+      ObanClaude.run(args, query_fun: fn _p, _o -> {:ok, result} end)
+
+      assert_received {:telemetry, [:oban_claude, :run, :stop], measurements, metadata}
+      assert is_integer(measurements.duration)
+      assert measurements.cost_usd == 0.0012
+      assert metadata.result == result
+      assert metadata.args == args
+    end
+
+    test "an is_error result still emits :stop (not :exception)", %{attach: attach} do
+      attach.([:oban_claude, :run, :stop], "oc-stop-iserror")
+      result = %Result{result: "", is_error: true}
+
+      ObanClaude.run(%{"prompt" => "x"}, query_fun: fn _p, _o -> {:ok, result} end)
+
+      assert_received {:telemetry, [:oban_claude, :run, :stop], _measurements, metadata}
+      assert metadata.result == result
+    end
+
+    test "cost_usd defaults to 0.0 when the result carries none", %{attach: attach} do
+      attach.([:oban_claude, :run, :stop], "oc-stop-nocost")
+
+      ObanClaude.run(%{"prompt" => "x"},
+        query_fun: fn _p, _o -> {:ok, %Result{result: "", is_error: false}} end
+      )
+
+      assert_received {:telemetry, _name, %{cost_usd: 0.0}, _metadata}
+    end
+
+    test "emits :exception with duration and error/args on a wrapper error", %{attach: attach} do
+      attach.([:oban_claude, :run, :exception], "oc-exception")
+      err = %Error{kind: :io}
+      args = %{"prompt" => "x"}
+
+      ObanClaude.run(args, query_fun: fn _p, _o -> {:error, err} end)
+
+      assert_received {:telemetry, [:oban_claude, :run, :exception], measurements, metadata}
+      assert is_integer(measurements.duration)
+      assert metadata.error == err
+      assert metadata.args == args
     end
   end
 
