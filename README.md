@@ -197,6 +197,14 @@ worker, a boot-time watch demo), use the installer:
 mix igniter.install oban_claude   # or: mix igniter.new my_app --install oban_claude
 ```
 
+For a single run with no queue or database, `mix oban_claude.run` sends CLI flags
+through the same `Args.new/1` vocabulary and prints the `{oban_return, result}`
+verdict (add `--json` for a machine-readable summary):
+
+```bash
+mix oban_claude.run "summarize the repo" --working-dir . --permission-mode plan
+```
+
 ## Testing
 
 `ObanClaude.run/2` and `use ObanClaude.Worker` accept a `:query_fun` (default
