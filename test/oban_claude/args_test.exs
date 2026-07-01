@@ -110,6 +110,29 @@ defmodule ObanClaude.ArgsTest do
     end
   end
 
+  describe "worktree" do
+    test "true builds an ephemeral-worktree flag" do
+      assert Args.new(prompt: "x", worktree: true) == %{"prompt" => "x", "worktree" => true}
+    end
+
+    test "a string builds a named worktree" do
+      assert Args.new(prompt: "x", worktree: "issue-173")["worktree"] == "issue-173"
+    end
+
+    test "is available in defaults/1 for blanket per-worker isolation" do
+      assert Args.defaults(working_dir: "/repo", worktree: true) == %{
+               "working_dir" => "/repo",
+               "worktree" => true
+             }
+    end
+
+    test "rejects a non-boolean, non-string worktree" do
+      assert_raise NimbleOptions.ValidationError, ~r/invalid value for :worktree/, fn ->
+        Args.new(prompt: "x", worktree: 5)
+      end
+    end
+  end
+
   describe "round-trip through run/2" do
     test "every emitted key survives build/1 and the enums reconstruct as atoms" do
       pid = self()
@@ -124,7 +147,8 @@ defmodule ObanClaude.ArgsTest do
         model: "sonnet",
         permission_mode: :plan,
         effort: :high,
-        allowed_tools: ["Read"]
+        allowed_tools: ["Read"],
+        worktree: "issue-5"
       )
       |> ObanClaude.run(query_fun: qf)
 
@@ -133,6 +157,7 @@ defmodule ObanClaude.ArgsTest do
       assert opts[:permission_mode] == :plan
       assert opts[:effort] == :high
       assert opts[:allowed_tools] == ["Read"]
+      assert opts[:worktree] == "issue-5"
     end
 
     test "meta keys are carried in the args but ignored by the query build" do

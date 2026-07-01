@@ -26,6 +26,7 @@ defmodule Mix.Tasks.ObanClaude.InstallTest do
     assert worker =~ "use ObanClaude.Worker"
     assert worker =~ "queue: :claude"
     assert worker =~ "query_fun: &__MODULE__.demo_query/2"
+    assert worker =~ "ObanClaude.Args.defaults(worktree: true)"
     assert worker =~ "ObanClaude.Worker"
   end
 

@@ -34,6 +34,14 @@ defmodule ObanClaude.Args do
     max_budget_usd: [type: {:or, [:float, :integer]}, doc: "Cost ceiling for the run, in USD."],
     timeout: [type: :pos_integer, doc: "Subprocess timeout in milliseconds."],
     json_schema: [type: :string, doc: "A JSON schema string for structured output."],
+    worktree: [
+      type: {:or, [:boolean, :string]},
+      doc:
+        "Run in a git worktree (`--worktree`). `true` for an ephemeral worktree, " <>
+          "a string for a named one (reusable across jobs -- e.g. `\"issue-173\"`). " <>
+          "Requires `working_dir` to be a git repo. Recommended for full-auto workers " <>
+          "that write to a repo -- set it in `defaults/1`."
+    ],
     meta: [
       type: {:map, {:or, [:atom, :string]}, :any},
       doc:

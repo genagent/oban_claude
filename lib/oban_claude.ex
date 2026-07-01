@@ -76,7 +76,7 @@ defmodule ObanClaude do
   # would be silently dropped when `build/1` assembles the query opts.
   @passthrough ~w(model max_turns max_budget_usd working_dir permission_mode timeout
                   system_prompt append_system_prompt fallback_model add_dir json_schema
-                  allowed_tools disallowed_tools mcp_config effort agent)
+                  allowed_tools disallowed_tools mcp_config effort agent worktree)
 
   # String key -> atom key, resolved at COMPILE time so the atoms always exist.
   # `String.to_existing_atom/1` would depend on ClaudeWrapper.Query (the module
