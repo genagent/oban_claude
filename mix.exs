@@ -32,7 +32,7 @@ defmodule ObanClaude.MixProject do
     [
       {:oban, "~> 2.23"},
       # The seam onto `claude -p`: a typed Result/Error and query/2.
-      {:claude_wrapper, "~> 0.10.0"},
+      {:claude_wrapper, "~> 0.11.0"},
       # Schema for `ObanClaude.Args`: validates the builder's options and
       # generates their documentation from a single source of truth.
       {:nimble_options, "~> 1.1"},
