@@ -33,6 +33,9 @@ defmodule ObanClaude.MixProject do
       {:oban, "~> 2.23"},
       # The seam onto `claude -p`: a typed Result/Error and query/2.
       {:claude_wrapper, "~> 0.10.0"},
+      # Schema for `ObanClaude.Args`: validates the builder's options and
+      # generates their documentation from a single source of truth.
+      {:nimble_options, "~> 1.1"},
       {:telemetry, "~> 1.2"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       # Dev/test only: backs the SQLite (Lite) Oban engine used by the
