@@ -123,7 +123,14 @@ if Code.ensure_loaded?(Igniter) do
       a real (paid) claude call. To call claude for real, delete the `query_fun`
       option from the `use` below.
       """
-      use ObanClaude.Worker, queue: :claude, max_attempts: 3, query_fun: &__MODULE__.demo_query/2
+      # `worktree: true` isolates each real run in its own git worktree (recommended
+      # for full-auto workers that write to a repo). It needs `working_dir` to be a
+      # git repo; the offline demo ignores it, so it is harmless until you go live.
+      use ObanClaude.Worker,
+        queue: :claude,
+        max_attempts: 3,
+        args: ObanClaude.Args.defaults(worktree: true),
+        query_fun: &__MODULE__.demo_query/2
 
       require Logger
 

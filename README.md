@@ -101,6 +101,26 @@ use ObanClaude.Worker, queue: :events, unique: [period: 60]
 config layering (app config, then worker `:args` defaults, then per-job args with
 the job winning) is the same in both cases.
 
+## Isolation (git worktrees)
+
+A full-auto worker that writes to a repo should isolate each run in its own git
+worktree, so concurrent (or successive) jobs never collide in one working copy.
+`worktree` maps to the claude CLI's `--worktree`; set it in the worker defaults:
+
+```elixir
+use ObanClaude.Worker,
+  queue: :issues,
+  args: ObanClaude.Args.defaults(working_dir: "/repo", worktree: true)
+```
+
+- `worktree: true` -- an ephemeral worktree per run.
+- `worktree: "issue-173"` (per job) -- a **named** worktree, reusable across jobs.
+  A per-job value overrides the worker default, so a chain of jobs for one issue
+  can share a worktree by passing the same name.
+
+It requires `working_dir` to be a git repo, so it is opt-in (a read-only or
+non-repo job would fail `--worktree`). The installer's sample worker enables it.
+
 ## Structured output (propose / dispose)
 
 Pass a `json_schema` (a JSON Schema string) and claude returns a validated
