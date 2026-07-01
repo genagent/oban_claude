@@ -30,9 +30,20 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-mix-
 
+      # Dialyzer's PLT is expensive to build; cache it keyed on the toolchain and
+      # deps so it only rebuilds when those change.
+      - uses: actions/cache@v4
+        with:
+          path: priv/plts
+          key: ${{ runner.os }}-plt-otp29-elixir1.20-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-plt-otp29-elixir1.20-
+
       - run: mix deps.get
       - run: mix compile --warnings-as-errors
       - run: mix format --check-formatted
+      - run: mix credo --strict
       # The :live tag (a real, paid claude call) is excluded by default, so CI
       # makes no API calls and needs no claude binary.
       - run: mix test
+      - run: mix dialyzer
