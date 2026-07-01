@@ -17,9 +17,17 @@ defmodule ObanClaude.MixProject do
       name: "oban_claude",
       source_url: @source_url,
       docs: [
-        main: "ObanClaude",
+        main: "readme",
         source_ref: "v#{@version}",
-        extras: ["README.md", "guides/agent_worker_patterns.md", "CHANGELOG.md"]
+        extras: [
+          "README.md",
+          "guides/getting_started.md",
+          "guides/agent_worker_patterns.md",
+          "CHANGELOG.md"
+        ],
+        groups_for_extras: [
+          Guides: ["guides/getting_started.md", "guides/agent_worker_patterns.md"]
+        ]
       ]
     ]
   end

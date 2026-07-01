@@ -255,10 +255,28 @@ Runnable, offline scripts (throwaway SQLite-backed Oban, claude stubbed via
 - `triage_issues.exs` -- a worker configured for issue triage.
 
 To scaffold a fresh project with all the pieces wired (SQLite, Oban, a sample
-worker, a boot-time watch demo), use the installer:
+worker, a boot-time watch demo), use the [Igniter](https://hexdocs.pm/igniter)
+installer. The `mix igniter.*` tasks come from Igniter, so it has to be present
+first.
+
+Into a **new** project -- install the `igniter_new` archive once (globally),
+then create the project with oban_claude:
 
 ```bash
-mix igniter.install oban_claude   # or: mix igniter.new my_app --install oban_claude
+mix archive.install hex igniter_new
+mix igniter.new my_app --install oban_claude
+```
+
+Into an **existing** project -- add Igniter to your deps, then install:
+
+```elixir
+# mix.exs
+{:igniter, "~> 0.6", only: [:dev, :test]}
+```
+
+```bash
+mix deps.get
+mix igniter.install oban_claude
 ```
 
 For a single run with no queue or database, `mix oban_claude.run` sends CLI flags
