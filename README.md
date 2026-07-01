@@ -91,7 +91,7 @@ via `:classifier`):
 | `Result is_error: true` | `{:error, :result_error}` | retry, capped by `max_attempts` |
 | `:timeout` | `{:snooze, 30}` | transient; back off |
 | `:command_failed` / `:json` / `:io` | `{:error, kind}` | likely transient; retry + backoff |
-| `:auth` / `:binary_not_found` | `{:cancel, ...}` | global/env problem; retrying cannot help |
+| `:auth`, `:binary_not_found`, and other config/env faults | `{:cancel, ...}` | the broken environment re-fails identically; retrying cannot help |
 | `:budget_exceeded` / `:max_turns_exceeded` | `{:cancel, ...}` | the rails stopped it; resume/re-scope is deliberate |
 
 ## Testing
