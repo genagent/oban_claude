@@ -121,6 +121,46 @@ use ObanClaude.Worker,
 It requires `working_dir` to be a git repo, so it is opt-in (a read-only or
 non-repo job would fail `--worktree`). The installer's sample worker enables it.
 
+## Full-auto workers
+
+A worker can run the agent full-auto: claude makes the change and opens the PR
+itself (the agent is its own sink -- oban_claude takes no part). Three things
+make an unattended, one-shot job reliable:
+
+- **Isolate** each run in its own git worktree, so concurrent jobs never collide
+  in the shared checkout.
+- **Bound the cost** with `max_turns` and `max_budget_usd`. A one-shot job has no
+  human to stop it; the classifier turns `max_turns_exceeded` into a `:cancel`.
+- **Keep it single-turn.** A batch job has no follow-up turn, so a *system* prompt
+  must tell the agent to finish at the draft PR and never wait on CI -- otherwise
+  it can park waiting for a notification that never comes (a user-prompt
+  instruction loses to the repo's own conventions).
+
+```elixir
+defmodule MyApp.IssueWorker do
+  use ObanClaude.Worker,
+    queue: :issues,
+    max_attempts: 1,
+    args:
+      ObanClaude.Args.defaults(
+        working_dir: "/repo",
+        permission_mode: :bypass_permissions,
+        worktree: true,
+        max_turns: 40,
+        max_budget_usd: 2.0,
+        append_system_prompt:
+          "You run as a single-turn batch job: there is no follow-up turn. " <>
+            "When you have opened the draft PR your job is complete -- end " <>
+            "immediately. Never wait for a notification or watch CI."
+      )
+end
+
+# one job per unit of work; a named worktree lets a future plan/implement/review
+# chain for the same issue share one worktree
+MyApp.IssueWorker.new(ObanClaude.Args.new(prompt: issue_text, worktree: "issue-#{n}"))
+|> Oban.insert()
+```
+
 ## Structured output (propose / dispose)
 
 Pass a `json_schema` (a JSON Schema string) and claude returns a validated
