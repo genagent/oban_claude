@@ -63,6 +63,16 @@ defmodule ObanClaude.WorkerTest do
     def handle_result(result, _job), do: {:ok, result.result}
   end
 
+  defmodule DefaultsWorker do
+    use ObanClaude.Worker,
+      queue: :test,
+      query_fun: &ObanClaude.WorkerTest.echo/2,
+      args: ObanClaude.Args.defaults(model: "haiku", system_prompt: "fixed")
+
+    @impl ObanClaude.Worker
+    def handle_result(result, _job), do: {:ok, result.result}
+  end
+
   defp job(args), do: %Oban.Job{args: args}
 
   test "the default handle_result/2 returns :ok on a clean result" do
@@ -90,5 +100,13 @@ defmodule ObanClaude.WorkerTest do
 
     assert captured =~ ~s("standing task")
     assert captured =~ ~s(model: "haiku")
+  end
+
+  test "worker :args built with Args.defaults/1 evaluates at compile time and merges" do
+    {:ok, captured} = DefaultsWorker.perform(job(%{"prompt" => "hi"}))
+
+    assert captured =~ ~s("hi")
+    assert captured =~ ~s(model: "haiku")
+    assert captured =~ ~s(system_prompt: "fixed")
   end
 end

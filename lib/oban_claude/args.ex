@@ -1,15 +1,16 @@
 defmodule ObanClaude.Args do
   # The single source of truth for the builder's vocabulary: this schema both
   # validates `new/1` and generates the "## Options" table in the moduledoc
-  # below. Every option is a batch-job-relevant subset of `ClaudeWrapper.Query`.
-  # Keep it superset-consistent with `ObanClaude`'s `@passthrough`, or a key the
-  # constructor emits would be silently dropped when `run/2` builds query opts
-  # (the round-trip test in test/oban_claude/args_test.exs guards this).
+  # below. Every claude option is a batch-job-relevant subset of
+  # `ClaudeWrapper.Query`. Keep those superset-consistent with `ObanClaude`'s
+  # `@passthrough`, or a key the constructor emits would be silently dropped when
+  # `run/2` builds query opts (the round-trip test guards this). `:meta` is the
+  # one non-claude option: an arbitrary metadata map merged into the result.
   @schema [
     prompt: [
       type: :string,
       required: true,
-      doc: "The claude prompt. The only required option."
+      doc: "The claude prompt. The only required option for `new/1`."
     ],
     model: [type: :string, doc: "Model name, e.g. `\"sonnet\"` or `\"opus\"`."],
     fallback_model: [type: :string, doc: "Model to fall back to if the primary is unavailable."],
@@ -32,10 +33,23 @@ defmodule ObanClaude.Args do
     max_turns: [type: :pos_integer, doc: "Cap on agent turns in the run."],
     max_budget_usd: [type: {:or, [:float, :integer]}, doc: "Cost ceiling for the run, in USD."],
     timeout: [type: :pos_integer, doc: "Subprocess timeout in milliseconds."],
-    json_schema: [type: :string, doc: "A JSON schema string for structured output."]
+    json_schema: [type: :string, doc: "A JSON schema string for structured output."],
+    meta: [
+      type: {:map, {:or, [:atom, :string]}, :any},
+      doc:
+        "Non-claude metadata merged into the args map untouched (keys stringified). " <>
+          "For values `handle_result/2` or telemetry needs -- an issue number, a " <>
+          "correlation id. Explicit claude options win on a key collision."
+    ]
   ]
 
   @options_schema NimbleOptions.new!(@schema)
+
+  # Same vocabulary as `@schema` but with `:prompt` optional -- for `defaults/1`,
+  # which builds worker-level `:args` (the prompt-less case).
+  @defaults_schema @schema
+                   |> Keyword.update!(:prompt, &Keyword.delete(&1, :required))
+                   |> NimbleOptions.new!()
 
   @moduledoc """
   Build a claude job's args map without knowing `claude_wrapper` or the CLI.
@@ -56,11 +70,34 @@ defmodule ObanClaude.Args do
 
       MyApp.ClaudeJob.new(ObanClaude.Args.new(prompt: "...")) |> Oban.insert()
 
+  ## Worker defaults
+
+  `defaults/1` is the same builder with `:prompt` optional, for the worker's
+  `:args` (the constant, prompt-less config). It evaluates at compile time, so it
+  works directly in the `use`:
+
+      use ObanClaude.Worker,
+        queue: :claude,
+        args: ObanClaude.Args.defaults(working_dir: ".", model: "sonnet",
+                                       permission_mode: :bypass_permissions)
+
+  ## Job metadata
+
+  The `:meta` option carries non-claude values (an issue number, a correlation id)
+  through to the Oban job args, where `handle_result/2` and telemetry can read
+  them. It is merged untouched (keys stringified) and is not validated as a claude
+  option:
+
+      ObanClaude.Args.new(prompt: "...", meta: %{"issue" => "173"})
+      #=> %{"prompt" => "...", "issue" => "173"}
+
+  ## Validation
+
   Unlike the raw-map path (which forwards known keys and silently ignores the
-  rest), `new/1` validates against the schema below: `:prompt` is required, an
-  unknown key raises, and each option's type (including the `:permission_mode`
-  and `:effort` vocabularies) is checked. Errors surface at construction /
-  enqueue time rather than when the job runs.
+  rest), the builder validates against the schema below: unknown keys raise, and
+  each option's type (including the `:permission_mode` and `:effort` vocabularies)
+  is checked. Errors surface at construction / enqueue time rather than when the
+  job runs.
 
   ## Options
 
@@ -76,14 +113,37 @@ defmodule ObanClaude.Args do
   """
   @spec new(keyword) :: %{required(String.t()) => term()}
   def new(opts) when is_list(opts) do
-    opts
-    |> NimbleOptions.validate!(@options_schema)
-    |> Map.new(fn {key, value} -> {Atom.to_string(key), serialize(value)} end)
+    opts |> NimbleOptions.validate!(@options_schema) |> to_map()
   end
 
-  @doc "The options `new/1` accepts."
+  @doc """
+  Build a worker-level defaults map: the same as `new/1`, but `:prompt` is
+  optional (worker `:args` are the prompt-less config the per-job args fill in).
+
+  Because it evaluates at compile time, it can be used directly in the worker's
+  `use` (see "Worker defaults" above).
+  """
+  @spec defaults(keyword) :: %{optional(String.t()) => term()}
+  def defaults(opts \\ []) when is_list(opts) do
+    opts |> NimbleOptions.validate!(@defaults_schema) |> to_map()
+  end
+
+  @doc "The options the builder accepts."
   @spec keys() :: [atom()]
   def keys, do: Keyword.keys(@schema)
+
+  # Validated opts -> the string-keyed map. `:meta` is pulled out and merged
+  # (stringified) rather than emitted as a claude arg; explicit claude options
+  # overlay it, so they win on a key collision.
+  defp to_map(opts) do
+    {meta, opts} = Keyword.pop(opts, :meta, %{})
+    base = Map.new(opts, fn {key, value} -> {Atom.to_string(key), serialize(value)} end)
+    Map.merge(stringify_keys(meta), base)
+  end
+
+  defp stringify_keys(map) do
+    Map.new(map, fn {key, value} -> {to_string(key), value} end)
+  end
 
   # Enum options carry atoms; serialize to the JSON string wire form (`ObanClaude`
   # coerces them back to atoms when it builds the query opts). Everything else

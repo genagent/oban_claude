@@ -17,7 +17,7 @@ defmodule ObanClaude.Worker do
         use ObanClaude.Worker,
           queue: :review,
           max_attempts: 3,
-          args: %{"model" => "sonnet", "system_prompt" => "Review the pull request."}
+          args: ObanClaude.Args.defaults(model: "sonnet", system_prompt: "Review the pull request.")
 
         @impl ObanClaude.Worker
         def handle_result(result, _job) do
@@ -36,8 +36,9 @@ defmodule ObanClaude.Worker do
   `:max_attempts`, `:unique`, `:priority`, ...) plus:
 
     * `:args` -- a map of default claude args, merged under each job's args (the
-      job wins). Defaults to `%{}`. A map literal; it may reference module
-      attributes defined before `use`.
+      job wins). Defaults to `%{}`. Build it with `ObanClaude.Args.defaults/1`
+      (prompt-optional; evaluates at compile time) or write the string map
+      directly. It may reference module attributes defined before `use`.
     * `:classifier` -- the outcome -> Oban-return mapping (see `ObanClaude.Outcome`),
       forwarded to `ObanClaude.run/2`.
     * `:query_fun` -- the claude entrypoint (defaults to `&ClaudeWrapper.query/2`),
