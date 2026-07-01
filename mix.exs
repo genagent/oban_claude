@@ -11,6 +11,11 @@ defmodule ObanClaude.MixProject do
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
+      dialyzer: [
+        plt_add_apps: [:mix, :ex_unit],
+        plt_local_path: "priv/plts",
+        plt_core_path: "priv/plts"
+      ],
       description:
         "Run Claude Code jobs on an Oban queue: an Oban.Worker over claude_wrapper that maps claude's typed result/error onto Oban return values.",
       package: package(),
@@ -52,7 +57,10 @@ defmodule ObanClaude.MixProject do
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       # Dev/test only: backs the SQLite (Lite) Oban engine used by the
       # dev/playground.exs harness. Never a runtime dep of the library.
-      {:ecto_sqlite3, "~> 0.17", only: [:dev, :test]}
+      {:ecto_sqlite3, "~> 0.17", only: [:dev, :test]},
+      # Static analysis. Never runtime deps.
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end
 

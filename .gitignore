@@ -25,3 +25,6 @@ oban_claude-*.tar
 # Track this repo's CLAUDE.md despite a global ignore (this project is about Claude).
 !CLAUDE.md
 
+
+# Dialyzer PLTs
+/priv/plts/
