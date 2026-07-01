@@ -1,6 +1,10 @@
 # oban_claude
 
+[![Hex.pm](https://img.shields.io/hexpm/v/oban_claude.svg)](https://hex.pm/packages/oban_claude)
+[![Hexdocs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/oban_claude)
 [![CI](https://github.com/genagent/oban_claude/actions/workflows/ci.yml/badge.svg)](https://github.com/genagent/oban_claude/actions/workflows/ci.yml)
+[![Downloads](https://img.shields.io/hexpm/dt/oban_claude.svg)](https://hex.pm/packages/oban_claude)
+[![License](https://img.shields.io/hexpm/l/oban_claude.svg)](https://github.com/genagent/oban_claude/blob/main/LICENSE)
 
 Run [Claude Code](https://github.com/anthropics/claude-code) jobs on an
 [Oban](https://hex.pm/packages/oban) queue. A thin worker over
