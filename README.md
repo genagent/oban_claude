@@ -80,6 +80,27 @@ config :my_app, Oban,
   plugins: [{Oban.Plugins.Cron, crontab: [{"0 9 * * *", MyApp.DailyDigest}]}]
 ```
 
+## Triggering
+
+A job is just a row, so anything that can insert one can trigger an agent. Two
+shapes cover most work:
+
+- **Scheduled** -- `Oban.Plugins.Cron` inserts an (empty) job on a crontab. The
+  worker holds the config; the schedule just says "run." See
+  `examples/scheduled_routine.exs`.
+- **Event-driven** -- a webhook, poller, or PubSub handler calls
+  `Worker.new(args) |> Oban.insert()` when something happens. Add `unique:` to
+  the worker and Oban debounces duplicate events, so a burst of the same signal
+  does the (paid) claude work once. See `examples/event_driven.exs`.
+
+```elixir
+use ObanClaude.Worker, queue: :events, unique: [period: 60]
+```
+
+`oban_claude` is trigger-agnostic: it never knows what inserted the job. The
+config layering (app config, then worker `:args` defaults, then per-job args with
+the job winning) is the same in both cases.
+
 ## Structured output (propose / dispose)
 
 Pass a `json_schema` (a JSON Schema string) and claude returns a validated
@@ -165,6 +186,8 @@ Runnable, offline scripts (throwaway SQLite-backed Oban, claude stubbed via
   follow-on effector job.
 - `scheduled_routine.exs` -- a Cron-driven routine: the worker holds the prompt,
   the job is empty, and `Oban.Plugins.Cron` fires it on a schedule.
+- `event_driven.exs` -- insert-driven triggering: a burst of identical events is
+  debounced to one run by Oban's `unique`, a distinct event gets its own.
 - `triage_issues.exs` -- a worker configured for issue triage.
 
 To scaffold a fresh project with all the pieces wired (SQLite, Oban, a sample
