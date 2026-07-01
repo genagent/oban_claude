@@ -37,6 +37,12 @@ defmodule Mix.Tasks.ObanClaude.RunTest do
       assert args["allowed_tools"] == ["Read", "Grep"]
     end
 
+    test "parses --worktree true/false as a boolean, else a named worktree" do
+      assert Run.build_args(["x", "--worktree", "true"])["worktree"] == true
+      assert Run.build_args(["x", "--worktree", "false"])["worktree"] == false
+      assert Run.build_args(["x", "--worktree", "issue-5"])["worktree"] == "issue-5"
+    end
+
     test "honors short aliases" do
       assert Run.build_args(["x", "-m", "opus", "-p", "plan"]) == %{
                "prompt" => "x",

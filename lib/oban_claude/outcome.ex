@@ -17,10 +17,12 @@ defmodule ObanClaude.Outcome do
   | a non-`%Error{}` error term          | `{:cancel, ...}` | off-contract and unclassifiable; do not blindly re-run |
 
   The config/env faults that cancel are `:auth`, `:binary_not_found`,
-  `:version_mismatch`, `:invalid_version`, `:dangerous_not_allowed`, and
-  `:invalid_tool_pattern`: a missing or unauthenticated binary, an unusable CLI
-  version, a disallowed flag, or a malformed tool pattern fails the same way on
-  every attempt, so retrying cannot help and only delays the dead-letter.
+  `:version_mismatch`, `:invalid_version`, `:dangerous_not_allowed`,
+  `:invalid_tool_pattern`, `:not_a_git_repo`, and `:git_unavailable`: a missing or
+  unauthenticated binary, an unusable CLI version, a disallowed flag, a malformed
+  tool pattern, or a `worktree` run against a non-git directory or a host without
+  git fails the same way on every attempt, so retrying cannot help and only
+  delays the dead-letter.
 
   The `:budget_exceeded` and `:max_turns_exceeded` rows are the genuinely
   app-dependent ones -- an app whose worker resumes via a pinned `--session-id`
@@ -39,16 +41,19 @@ defmodule ObanClaude.Outcome do
   @snooze_seconds 30
 
   # Config/environment faults: a missing or unauthenticated binary, an unusable
-  # CLI version, a disallowed flag, or a malformed tool pattern re-fails
-  # identically on every attempt. Cancel so the job dead-letters at once rather
-  # than burning the whole `max_attempts` budget on a retry that cannot succeed.
+  # CLI version, a disallowed flag, a malformed tool pattern, or a `worktree` run
+  # against a non-git dir / a host without git re-fails identically on every
+  # attempt. Cancel so the job dead-letters at once rather than burning the whole
+  # `max_attempts` budget on a retry that cannot succeed.
   @config_faults [
     :auth,
     :binary_not_found,
     :version_mismatch,
     :invalid_version,
     :dangerous_not_allowed,
-    :invalid_tool_pattern
+    :invalid_tool_pattern,
+    :not_a_git_repo,
+    :git_unavailable
   ]
 
   # The rails deliberately stopped a run that was otherwise progressing. A blind

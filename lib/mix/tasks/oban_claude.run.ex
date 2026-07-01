@@ -30,6 +30,8 @@ defmodule Mix.Tasks.ObanClaude.Run do
     * `--effort` -- one of `low`, `medium`, `high`, `xhigh`, `max`
     * `--max-turns`, `--timeout` -- integers
     * `--max-budget-usd` -- float
+    * `--worktree` -- `true`/`false` for an ephemeral worktree, or a name for a
+      named one (e.g. `--worktree issue-42`). Needs `--working-dir` to be a git repo.
     * `--json-schema` -- path/string for a structured-output run
     * `--add-dir`, `--allowed-tools`, `--disallowed-tools`, `--mcp-config` --
       repeatable (pass the flag once per value)
@@ -57,6 +59,7 @@ defmodule Mix.Tasks.ObanClaude.Run do
     max_turns: :integer,
     timeout: :integer,
     max_budget_usd: :float,
+    worktree: :string,
     add_dir: [:string, :keep],
     allowed_tools: [:string, :keep],
     disallowed_tools: [:string, :keep],
@@ -108,6 +111,7 @@ defmodule Mix.Tasks.ObanClaude.Run do
       |> put_prompt(positional)
       |> group_lists()
       |> coerce_atoms()
+      |> coerce_worktree()
 
     {json?, ObanClaude.Args.new(args_kw)}
   end
@@ -139,6 +143,16 @@ defmodule Mix.Tasks.ObanClaude.Run do
       {key, value} when key in @atom_keys and is_binary(value) -> {key, String.to_atom(value)}
       pair -> pair
     end)
+  end
+
+  # `--worktree` is boolean-or-string: "true"/"false" become the booleans (an
+  # ephemeral worktree / none), any other value is a named worktree.
+  defp coerce_worktree(opts) do
+    case Keyword.fetch(opts, :worktree) do
+      {:ok, "true"} -> Keyword.put(opts, :worktree, true)
+      {:ok, "false"} -> Keyword.put(opts, :worktree, false)
+      _ -> opts
+    end
   end
 
   defp format_invalid(invalid) do

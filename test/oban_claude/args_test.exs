@@ -110,6 +110,17 @@ defmodule ObanClaude.ArgsTest do
     end
   end
 
+  describe "keys/0" do
+    test "lists the accepted option keys" do
+      keys = Args.keys()
+
+      assert is_list(keys) and Enum.all?(keys, &is_atom/1)
+      assert :prompt in keys
+      assert :worktree in keys
+      assert :meta in keys
+    end
+  end
+
   describe "worktree" do
     test "true builds an ephemeral-worktree flag" do
       assert Args.new(prompt: "x", worktree: true) == %{"prompt" => "x", "worktree" => true}
