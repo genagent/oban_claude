@@ -19,9 +19,18 @@ defmodule ObanClaude do
 
   ## Example
 
+  Build the job's args with `ObanClaude.Args.new/1` (atom keys, validated) rather
+  than a hand-written string map:
+
       defmodule MyApp.ClaudeJob do
         use ObanClaude.Worker, queue: :claude, max_attempts: 3
       end
+
+      ObanClaude.Args.new(prompt: "summarize the repo", working_dir: "/path/to/repo")
+      |> MyApp.ClaudeJob.new()
+      |> Oban.insert()
+
+  The raw string-keyed map is still accepted as the low-level escape hatch:
 
       %{"prompt" => "summarize the repo", "working_dir" => "/path/to/repo"}
       |> MyApp.ClaudeJob.new()
@@ -62,9 +71,12 @@ defmodule ObanClaude do
   @type oban_return ::
           :ok | {:ok, term} | {:error, term} | {:cancel, term} | {:snooze, pos_integer}
 
-  # Args-map keys passed straight through to `ClaudeWrapper.query/2`.
+  # Args-map keys passed straight through to `ClaudeWrapper.query/2`. Kept a
+  # superset of `ObanClaude.Args`'s curated keys, or a key the constructor emits
+  # would be silently dropped when `build/1` assembles the query opts.
   @passthrough ~w(model max_turns max_budget_usd working_dir permission_mode timeout
-                  system_prompt append_system_prompt fallback_model add_dir json_schema)
+                  system_prompt append_system_prompt fallback_model add_dir json_schema
+                  allowed_tools disallowed_tools mcp_config effort agent)
 
   # String key -> atom key, resolved at COMPILE time so the atoms always exist.
   # `String.to_existing_atom/1` would depend on ClaudeWrapper.Query (the module
@@ -80,6 +92,11 @@ defmodule ObanClaude do
   # and validates the accepted vocabulary here.
   @permission_modes ~w(default accept_edits bypass_permissions dont_ask plan auto)
                     |> Map.new(&{&1, String.to_atom(&1)})
+
+  # `effort` is the second atom-valued key: `ClaudeWrapper.query/2` matches it as
+  # an atom, but it arrives as a JSON string. Same allowlist treatment as
+  # `permission_mode`, for the same load-order reason.
+  @efforts ~w(low medium high xhigh max) |> Map.new(&{&1, String.to_atom(&1)})
 
   @doc """
   Run a claude job from a string-keyed `args` map.
@@ -152,19 +169,25 @@ defmodule ObanClaude do
   end
 
   # JSON args carry strings; map the atom-valued ones through their allowlist.
-  defp coerce("permission_mode", value) when is_binary(value) do
-    case Map.fetch(@permission_modes, value) do
-      {:ok, mode} ->
-        mode
+  defp coerce("permission_mode", value) when is_binary(value),
+    do: from_allowlist("permission_mode", @permission_modes, value)
+
+  defp coerce("effort", value) when is_binary(value),
+    do: from_allowlist("effort", @efforts, value)
+
+  defp coerce(_key, value), do: value
+
+  defp from_allowlist(key, allowlist, value) do
+    case Map.fetch(allowlist, value) do
+      {:ok, atom} ->
+        atom
 
       :error ->
         raise ArgumentError,
-              "unknown permission_mode #{inspect(value)}; " <>
-                "expected one of #{inspect(Map.keys(@permission_modes))}"
+              "unknown #{key} #{inspect(value)}; " <>
+                "expected one of #{inspect(Map.keys(allowlist))}"
     end
   end
-
-  defp coerce(_key, value), do: value
 
   defp emit({:ok, %Result{} = r}, start, args) do
     :telemetry.execute(

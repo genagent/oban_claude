@@ -29,7 +29,8 @@ defmodule ObanClaude.Worker do
       end
 
       # the job is just the instance:
-      MyApp.PrReview.new(%{"prompt" => "PR #4321: " <> diff}) |> Oban.insert()
+      MyApp.PrReview.new(ObanClaude.Args.new(prompt: "PR #4321: " <> diff))
+      |> Oban.insert()
 
   `use ObanClaude.Worker` accepts every `Oban.Worker` option (`:queue`,
   `:max_attempts`, `:unique`, `:priority`, ...) plus:
