@@ -1,4 +1,42 @@
 defmodule ObanClaude.Args do
+  # The single source of truth for the builder's vocabulary: this schema both
+  # validates `new/1` and generates the "## Options" table in the moduledoc
+  # below. Every option is a batch-job-relevant subset of `ClaudeWrapper.Query`.
+  # Keep it superset-consistent with `ObanClaude`'s `@passthrough`, or a key the
+  # constructor emits would be silently dropped when `run/2` builds query opts
+  # (the round-trip test in test/oban_claude/args_test.exs guards this).
+  @schema [
+    prompt: [
+      type: :string,
+      required: true,
+      doc: "The claude prompt. The only required option."
+    ],
+    model: [type: :string, doc: "Model name, e.g. `\"sonnet\"` or `\"opus\"`."],
+    fallback_model: [type: :string, doc: "Model to fall back to if the primary is unavailable."],
+    working_dir: [type: :string, doc: "Directory claude runs in."],
+    add_dir: [type: {:list, :string}, doc: "Extra directories claude may access."],
+    system_prompt: [type: :string, doc: "Replace claude's system prompt."],
+    append_system_prompt: [type: :string, doc: "Append to claude's system prompt."],
+    permission_mode: [
+      type: {:in, [:default, :accept_edits, :bypass_permissions, :dont_ask, :plan, :auto]},
+      doc: "How claude handles tool-permission prompts."
+    ],
+    allowed_tools: [type: {:list, :string}, doc: "Whitelist of tools claude may use."],
+    disallowed_tools: [type: {:list, :string}, doc: "Blacklist of tools claude may not use."],
+    mcp_config: [type: {:list, :string}, doc: "MCP server config file paths."],
+    agent: [type: :string, doc: "Named agent/subagent to run as."],
+    effort: [
+      type: {:in, [:low, :medium, :high, :xhigh, :max]},
+      doc: "Reasoning effort level."
+    ],
+    max_turns: [type: :pos_integer, doc: "Cap on agent turns in the run."],
+    max_budget_usd: [type: {:or, [:float, :integer]}, doc: "Cost ceiling for the run, in USD."],
+    timeout: [type: :pos_integer, doc: "Subprocess timeout in milliseconds."],
+    json_schema: [type: :string, doc: "A JSON schema string for structured output."]
+  ]
+
+  @options_schema NimbleOptions.new!(@schema)
+
   @moduledoc """
   Build a claude job's args map without knowing `claude_wrapper` or the CLI.
 
@@ -19,97 +57,39 @@ defmodule ObanClaude.Args do
       MyApp.ClaudeJob.new(ObanClaude.Args.new(prompt: "...")) |> Oban.insert()
 
   Unlike the raw-map path (which forwards known keys and silently ignores the
-  rest), `new/1` validates: `:prompt` is required, an unknown key raises, and the
-  two atom-valued enums (`:permission_mode`, `:effort`) are checked against their
-  vocabulary. Errors surface at construction / enqueue time rather than when the
-  job runs.
+  rest), `new/1` validates against the schema below: `:prompt` is required, an
+  unknown key raises, and each option's type (including the `:permission_mode`
+  and `:effort` vocabularies) is checked. Errors surface at construction /
+  enqueue time rather than when the job runs.
+
+  ## Options
+
+  #{NimbleOptions.docs(@options_schema)}
   """
-
-  # The curated vocabulary: atom keys the caller may pass, each a subset of
-  # `ClaudeWrapper.Query`'s fields chosen as batch-job-relevant. `:prompt` is
-  # required and handled separately; the rest are optional passthroughs. This set
-  # must stay a superset-consistent match with `ObanClaude`'s `@passthrough`, or a
-  # key emitted here would be silently dropped when `run/2` builds query opts.
-  @string_keys ~w(prompt model working_dir system_prompt append_system_prompt
-                  fallback_model json_schema agent)a
-  @number_keys ~w(max_turns max_budget_usd timeout)a
-  @list_keys ~w(add_dir allowed_tools disallowed_tools mcp_config)a
-  @enum_keys ~w(permission_mode effort)a
-
-  @keys @string_keys ++ @number_keys ++ @list_keys ++ @enum_keys
-
-  # Atom-valued enums, validated here so a bad value fails at enqueue rather than
-  # perform. Kept in sync with `ClaudeWrapper.Query`'s `permission_mode`/`effort`
-  # types and with `ObanClaude`'s coerce allowlists (which map them back on run).
-  @permission_modes ~w(default accept_edits bypass_permissions dont_ask plan auto)a
-  @efforts ~w(low medium high xhigh max)a
-
-  @enum_vocab %{permission_mode: @permission_modes, effort: @efforts}
 
   @doc """
   Build a string-keyed args map from a keyword list of atom-keyed options.
 
-  `:prompt` (a string) is required. Every other key is optional and must be one of
-  the curated keys; an unknown key raises `ArgumentError`. `:permission_mode` and
-  `:effort` accept an atom from their vocabulary and raise on anything else.
-
-  Returns the map Oban serializes as the job's args.
+  Validates `opts` against the schema documented above (see "Options"). Raises
+  `NimbleOptions.ValidationError` on a missing `:prompt`, an unknown key, or a
+  value of the wrong type. Returns the map Oban serializes as the job's args.
   """
   @spec new(keyword) :: %{required(String.t()) => term()}
   def new(opts) when is_list(opts) do
-    validate_keys!(opts)
-    validate_prompt!(opts)
-    Enum.each(@enum_keys, &validate_enum!(opts, &1))
-
-    Map.new(opts, fn {key, value} -> {Atom.to_string(key), serialize(key, value)} end)
+    opts
+    |> NimbleOptions.validate!(@options_schema)
+    |> Map.new(fn {key, value} -> {Atom.to_string(key), serialize(value)} end)
   end
 
-  @doc "The curated keys `new/1` accepts."
+  @doc "The options `new/1` accepts."
   @spec keys() :: [atom()]
-  def keys, do: @keys
+  def keys, do: Keyword.keys(@schema)
 
-  defp validate_keys!(opts) do
-    case Keyword.keys(opts) -- @keys do
-      [] ->
-        :ok
-
-      unknown ->
-        raise ArgumentError,
-              "unknown args key(s) #{inspect(unknown)}; expected one of #{inspect(@keys)}"
-    end
-  end
-
-  defp validate_prompt!(opts) do
-    case Keyword.fetch(opts, :prompt) do
-      {:ok, prompt} when is_binary(prompt) ->
-        :ok
-
-      {:ok, other} ->
-        raise ArgumentError, ":prompt must be a string, got #{inspect(other)}"
-
-      :error ->
-        raise ArgumentError, ":prompt is required"
-    end
-  end
-
-  defp validate_enum!(opts, key) do
-    case Keyword.fetch(opts, key) do
-      {:ok, value} ->
-        vocab = Map.fetch!(@enum_vocab, key)
-
-        unless value in vocab do
-          raise ArgumentError,
-                "unknown #{key} #{inspect(value)}; expected one of #{inspect(vocab)}"
-        end
-
-      :error ->
-        :ok
-    end
-  end
-
-  # Atom-valued enums serialize to strings (the JSON wire form); `ObanClaude`
-  # coerces them back to atoms when it builds the query opts. Everything else
+  # Enum options carry atoms; serialize to the JSON string wire form (`ObanClaude`
+  # coerces them back to atoms when it builds the query opts). Everything else
   # (strings, numbers, lists of strings) is already JSON-clean.
-  defp serialize(key, value) when key in @enum_keys, do: Atom.to_string(value)
-  defp serialize(_key, value), do: value
+  defp serialize(value) when is_atom(value) and value not in [true, false, nil],
+    do: Atom.to_string(value)
+
+  defp serialize(value), do: value
 end

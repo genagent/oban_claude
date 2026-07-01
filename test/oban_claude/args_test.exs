@@ -27,31 +27,31 @@ defmodule ObanClaude.ArgsTest do
     end
 
     test "requires a prompt" do
-      assert_raise ArgumentError, ~r/:prompt is required/, fn ->
+      assert_raise NimbleOptions.ValidationError, ~r/required :prompt option not found/, fn ->
         Args.new(model: "sonnet")
       end
     end
 
     test "rejects a non-string prompt" do
-      assert_raise ArgumentError, ~r/:prompt must be a string/, fn ->
+      assert_raise NimbleOptions.ValidationError, ~r/invalid value for :prompt/, fn ->
         Args.new(prompt: :not_a_string)
       end
     end
 
     test "raises on an unknown key" do
-      assert_raise ArgumentError, ~r/unknown args key\(s\) \[:workingdir\]/, fn ->
+      assert_raise NimbleOptions.ValidationError, ~r/unknown options \[:workingdir\]/, fn ->
         Args.new(prompt: "x", workingdir: "/typo")
       end
     end
 
     test "raises on an out-of-vocabulary permission_mode" do
-      assert_raise ArgumentError, ~r/unknown permission_mode :nope/, fn ->
+      assert_raise NimbleOptions.ValidationError, ~r/invalid value for :permission_mode/, fn ->
         Args.new(prompt: "x", permission_mode: :nope)
       end
     end
 
     test "raises on an out-of-vocabulary effort" do
-      assert_raise ArgumentError, ~r/unknown effort :turbo/, fn ->
+      assert_raise NimbleOptions.ValidationError, ~r/invalid value for :effort/, fn ->
         Args.new(prompt: "x", effort: :turbo)
       end
     end
