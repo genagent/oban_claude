@@ -29,6 +29,9 @@ defmodule ObanClaudeTest do
         :invalid_version,
         :dangerous_not_allowed,
         :invalid_tool_pattern,
+        # worktree/git faults: a non-git working_dir or a host without git
+        :not_a_git_repo,
+        :git_unavailable,
         # rail-stops: the rails deliberately halted the run
         :budget_exceeded,
         :max_turns_exceeded
