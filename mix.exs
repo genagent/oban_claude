@@ -54,7 +54,7 @@ defmodule ObanClaude.MixProject do
       # task module only compiles when Igniter is loaded, so it never ships as a
       # runtime dependency of the library.
       {:igniter, "~> 0.6", only: [:dev, :test]},
-      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:ex_doc, "~> 0.34", only: [:dev, :test], runtime: false},
       # Dev/test only: backs the SQLite (Lite) Oban engine used by the
       # dev/playground.exs harness. Never a runtime dep of the library.
       {:ecto_sqlite3, "~> 0.17", only: [:dev, :test]},
