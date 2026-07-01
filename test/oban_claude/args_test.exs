@@ -57,6 +57,59 @@ defmodule ObanClaude.ArgsTest do
     end
   end
 
+  describe "defaults/1" do
+    test "builds a prompt-less map for worker :args" do
+      assert Args.defaults(
+               working_dir: "/repo",
+               model: "sonnet",
+               permission_mode: :bypass_permissions
+             ) ==
+               %{
+                 "working_dir" => "/repo",
+                 "model" => "sonnet",
+                 "permission_mode" => "bypass_permissions"
+               }
+    end
+
+    test "an empty defaults map is valid" do
+      assert Args.defaults() == %{}
+    end
+
+    test "still allows a prompt if given" do
+      assert Args.defaults(prompt: "fixed") == %{"prompt" => "fixed"}
+    end
+
+    test "still validates unknown keys and enum values" do
+      assert_raise NimbleOptions.ValidationError, ~r/unknown options \[:nope\]/, fn ->
+        Args.defaults(nope: 1)
+      end
+
+      assert_raise NimbleOptions.ValidationError, ~r/invalid value for :permission_mode/, fn ->
+        Args.defaults(permission_mode: :wild)
+      end
+    end
+  end
+
+  describe ":meta" do
+    test "merges metadata into the args map, stringifying keys" do
+      assert Args.new(prompt: "x", meta: %{"issue" => "173", number: 42}) == %{
+               "prompt" => "x",
+               "issue" => "173",
+               "number" => 42
+             }
+    end
+
+    test "explicit claude options win over a colliding meta key" do
+      args = Args.new(prompt: "x", model: "sonnet", meta: %{"model" => "should-lose"})
+
+      assert args["model"] == "sonnet"
+    end
+
+    test "works with defaults/1 too" do
+      assert Args.defaults(meta: %{"queue" => "issues"}) == %{"queue" => "issues"}
+    end
+  end
+
   describe "round-trip through run/2" do
     test "every emitted key survives build/1 and the enums reconstruct as atoms" do
       pid = self()
@@ -80,6 +133,22 @@ defmodule ObanClaude.ArgsTest do
       assert opts[:permission_mode] == :plan
       assert opts[:effort] == :high
       assert opts[:allowed_tools] == ["Read"]
+    end
+
+    test "meta keys are carried in the args but ignored by the query build" do
+      pid = self()
+
+      qf = fn _prompt, opts ->
+        send(pid, {:queried, opts})
+        {:ok, %Result{result: "", is_error: false}}
+      end
+
+      args = Args.new(prompt: "x", meta: %{"issue" => "173"})
+      assert args["issue"] == "173"
+
+      ObanClaude.run(args, query_fun: qf)
+      assert_received {:queried, opts}
+      refute Keyword.has_key?(opts, :issue)
     end
   end
 end
