@@ -154,6 +154,26 @@ via `:classifier`):
 | `:auth`, `:binary_not_found`, and other config/env faults | `{:cancel, ...}` | the broken environment re-fails identically; retrying cannot help |
 | `:budget_exceeded` / `:max_turns_exceeded` | `{:cancel, ...}` | the rails stopped it; resume/re-scope is deliberate |
 
+## Examples
+
+Runnable, offline scripts (throwaway SQLite-backed Oban, claude stubbed via
+`:query_fun`), each `mix run examples/<name>.exs`:
+
+- `playground.exs` -- one job per claude outcome, watch the queue resolve them
+  (`:ok` / cancel / retry / snooze).
+- `propose_dispose.exs` -- a structured-output run whose result drives a
+  follow-on effector job.
+- `scheduled_routine.exs` -- a Cron-driven routine: the worker holds the prompt,
+  the job is empty, and `Oban.Plugins.Cron` fires it on a schedule.
+- `triage_issues.exs` -- a worker configured for issue triage.
+
+To scaffold a fresh project with all the pieces wired (SQLite, Oban, a sample
+worker, a boot-time watch demo), use the installer:
+
+```bash
+mix igniter.install oban_claude   # or: mix igniter.new my_app --install oban_claude
+```
+
 ## Testing
 
 `ObanClaude.run/2` and `use ObanClaude.Worker` accept a `:query_fun` (default
