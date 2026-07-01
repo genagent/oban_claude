@@ -19,7 +19,7 @@ defmodule ObanClaude.MixProject do
       docs: [
         main: "ObanClaude",
         source_ref: "v#{@version}",
-        extras: ["README.md", "CHANGELOG.md"]
+        extras: ["README.md", "guides/agent_worker_patterns.md", "CHANGELOG.md"]
       ]
     ]
   end
