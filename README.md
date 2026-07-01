@@ -80,6 +80,66 @@ config :my_app, Oban,
   plugins: [{Oban.Plugins.Cron, crontab: [{"0 9 * * *", MyApp.DailyDigest}]}]
 ```
 
+## Structured output (propose / dispose)
+
+Pass a `json_schema` (a JSON Schema string) and claude returns a validated
+object instead of prose. `ObanClaude.structured/1` reads the whole object off the
+result; `ObanClaude.outcome/1` is the shorthand for its `"outcome"` key.
+
+This is the propose / dispose split: the worker runs read-only and *proposes* a
+typed verdict, and `handle_result/2` *disposes* of it (act on it, branch, or
+enqueue a follow-on effector job that does the writing).
+
+```elixir
+defmodule MyApp.Triage do
+  @schema Jason.encode!(%{
+            "type" => "object",
+            "additionalProperties" => false,
+            "required" => ["outcome", "summary"],
+            "properties" => %{
+              "outcome" => %{"enum" => ["fix", "needs_review", "wontfix"]},
+              "summary" => %{"type" => "string"}
+            }
+          })
+
+  use ObanClaude.Worker,
+    queue: :triage,
+    max_attempts: 3,
+    args: %{
+      "model" => "sonnet",
+      "json_schema" => @schema,
+      "system_prompt" => "Triage the issue. Inspect the repo but do not write anything."
+    }
+
+  @impl ObanClaude.Worker
+  def handle_result(result, _job) do
+    case ObanClaude.structured(result) do
+      %{"outcome" => "fix", "summary" => summary} ->
+        # dispose: hand the proposal to an effector that actually writes
+        %{"prompt" => "Implement this change: " <> summary}
+        |> MyApp.Implement.new()
+        |> Oban.insert()
+
+        :ok
+
+      %{"outcome" => "wontfix"} ->
+        {:cancel, :wontfix}
+
+      _ ->
+        :ok
+    end
+  end
+end
+
+MyApp.Triage.new(%{"prompt" => "Issue #87: " <> body}) |> Oban.insert()
+```
+
+The schema is just another job arg: fix it on the worker (`:args`, above) so every
+job shares it, or pass a per-job `"json_schema"`. `@schema` is a module attribute
+referenced before `use`, which the worker macro allows. `outcome/1` and
+`structured/1` return `nil` on a run that produced no structured output, so a
+worker that sometimes runs without a schema can fall through to a plain-text path.
+
 ## The classifier
 
 `oban_claude` maps each claude outcome onto the right Oban verdict (overridable
