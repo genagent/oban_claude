@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/genagent/oban_claude/compare/v0.2.0...v0.3.0) (2026-07-14)
+
+
+### Features
+
+* adopt claude_wrapper 0.14.0 and expose its new one-shot query flags ([#112](https://github.com/genagent/oban_claude/issues/112)) ([f2de7c6](https://github.com/genagent/oban_claude/commit/f2de7c608cafe85710200697bc58e6186282b8f7))
+
 ## [0.2.0](https://github.com/genagent/oban_claude/compare/v0.1.0...v0.2.0) (2026-07-14)
 
 
