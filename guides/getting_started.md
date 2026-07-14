@@ -139,8 +139,10 @@ defmodule MyApp.SummaryWorker do
   end
 
   @doc false
+  # A stubbed claude return, built with ObanClaude.Testing so the test/demo
+  # never hard-codes claude_wrapper's struct shape.
   def fake_query(prompt, _opts) do
-    {:ok, %ClaudeWrapper.Result{result: "a summary of: #{prompt}", is_error: false, cost_usd: 0.0}}
+    {:ok, ObanClaude.Testing.result("a summary of: #{prompt}")}
   end
 end
 ```
@@ -169,7 +171,51 @@ That is the whole path: `Oban.insert/1` → the queue claims the job →
 `handle_result/2`. Oban owns the durability (retries, uniqueness, the reaper);
 oban_claude is the seam that runs claude.
 
-## 9. Make it real
+## 9. Test it offline
+
+The `query_fun` seam is also the testing story: pass a stub `query_fun` and no
+real claude call happens. [`ObanClaude.Testing`](ObanClaude.Testing.html) builds
+the stub return values, so your tests never hard-code `claude_wrapper`'s structs
+(and a shift in that representation breaks *this* library's tests, not yours).
+
+`handle_result/2` is a plain function -- test it directly with a built result:
+
+```elixir
+defmodule MyApp.SummaryWorkerTest do
+  use ExUnit.Case, async: true
+  import ObanClaude.Testing
+
+  test "handle_result/2 returns :ok on a clean result" do
+    assert :ok = MyApp.SummaryWorker.handle_result(result("a summary"), %Oban.Job{args: %{}})
+  end
+end
+```
+
+To exercise the whole seam -- args → `run/2` → classifier -- pass a stub
+`query_fun` to `ObanClaude.run/2`:
+
+```elixir
+# a clean success
+assert {:ok, _} = ObanClaude.run(%{"prompt" => "x"}, query_fun: respond("done"))
+
+# a failure, mapped by the default classifier
+assert {{:cancel, :auth}, _} = ObanClaude.run(%{"prompt" => "x"}, query_fun: fail(:auth))
+
+# a retry path: attempt 1 is rate-limited, attempt 2 succeeds
+qf = sequence([error(:auth, reason: :rate_limit), "done"])
+assert {{:error, :rate_limit}, _} = ObanClaude.run(%{"prompt" => "x"}, query_fun: qf)
+assert {:ok, _} = ObanClaude.run(%{"prompt" => "x"}, query_fun: qf)
+```
+
+And `Oban.Testing.perform_job/3` runs the full worker (with its compiled-in stub
+`query_fun`) when you want to assert the Oban return end-to-end:
+
+```elixir
+use Oban.Testing, repo: MyApp.Repo
+assert :ok = perform_job(MyApp.SummaryWorker, %{"prompt" => "x"})
+```
+
+## 10. Make it real
 
 Delete the `query_fun:` line from the worker. Now `perform/1` calls the real
 `claude` CLI (via `claude_wrapper`), so you need `claude` installed and
