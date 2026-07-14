@@ -42,6 +42,16 @@ defmodule ObanClaude.Args do
           "Requires `working_dir` to be a git repo. Recommended for full-auto workers " <>
           "that write to a repo -- set it in `defaults/1`."
     ],
+    hermetic: [
+      type: {:in, [:full, :project]},
+      doc:
+        "Seal the ambient `~/.claude` config so the run's surface is exactly what " <>
+          "these args set (`--setting-sources`, `--strict-mcp-config`, " <>
+          "`--exclude-dynamic-system-prompt-sections`; auth untouched). `:full` drops " <>
+          "user + project + local ambient config; `:project` seals project + local but " <>
+          "keeps the user's global `~/.claude`. Recommended in `defaults/1` for " <>
+          "reproducible server runs that should not depend on the host's config."
+    ],
     meta: [
       type: {:map, {:or, [:atom, :string]}, :any},
       doc:

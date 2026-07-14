@@ -76,7 +76,7 @@ defmodule ObanClaude do
   # would be silently dropped when `build/1` assembles the query opts.
   @passthrough ~w(model max_turns max_budget_usd working_dir permission_mode timeout
                   system_prompt append_system_prompt fallback_model add_dir json_schema
-                  allowed_tools disallowed_tools mcp_config effort agent worktree)
+                  allowed_tools disallowed_tools mcp_config effort agent worktree hermetic)
 
   # String key -> atom key, resolved at COMPILE time so the atoms always exist.
   # `String.to_existing_atom/1` would depend on ClaudeWrapper.Query (the module
@@ -97,6 +97,11 @@ defmodule ObanClaude do
   # an atom, but it arrives as a JSON string. Same allowlist treatment as
   # `permission_mode`, for the same load-order reason.
   @efforts ~w(low medium high xhigh max) |> Map.new(&{&1, String.to_atom(&1)})
+
+  # `hermetic` is the third atom-valued key: the config-seal scope
+  # (`ClaudeWrapper.Query.hermetic/2`) is `:full` or `:project`, but arrives as a
+  # JSON string. Same allowlist treatment as `permission_mode` and `effort`.
+  @hermetic_scopes ~w(full project) |> Map.new(&{&1, String.to_atom(&1)})
 
   @doc """
   Run a claude job from a string-keyed `args` map.
@@ -174,6 +179,9 @@ defmodule ObanClaude do
 
   defp coerce("effort", value) when is_binary(value),
     do: from_allowlist("effort", @efforts, value)
+
+  defp coerce("hermetic", value) when is_binary(value),
+    do: from_allowlist("hermetic", @hermetic_scopes, value)
 
   defp coerce(_key, value), do: value
 
