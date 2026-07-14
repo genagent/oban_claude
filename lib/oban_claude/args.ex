@@ -15,7 +15,10 @@ defmodule ObanClaude.Args do
     model: [type: :string, doc: "Model name, e.g. `\"sonnet\"` or `\"opus\"`."],
     fallback_model: [type: :string, doc: "Model to fall back to if the primary is unavailable."],
     working_dir: [type: :string, doc: "Directory claude runs in."],
-    add_dir: [type: {:list, :string}, doc: "Extra directories claude may access."],
+    add_dir: [
+      type: {:or, [{:list, :string}, :string]},
+      doc: "Extra directories claude may access -- a single path or a list of paths."
+    ],
     system_prompt: [type: :string, doc: "Replace claude's system prompt."],
     append_system_prompt: [type: :string, doc: "Append to claude's system prompt."],
     permission_mode: [
@@ -43,9 +46,10 @@ defmodule ObanClaude.Args do
           "that write to a repo -- set it in `defaults/1`."
     ],
     hermetic: [
-      type: {:in, [:full, :project]},
+      type: {:in, [:full, :project, true]},
       doc:
         "Seal the ambient `~/.claude` config so the run's surface is exactly what " <>
+          "these args set. `true` is accepted as an alias for `:full`. " <>
           "these args set (`--setting-sources`, `--strict-mcp-config`, " <>
           "`--exclude-dynamic-system-prompt-sections`; auth untouched). `:full` drops " <>
           "user + project + local ambient config; `:project` seals project + local but " <>
@@ -62,6 +66,11 @@ defmodule ObanClaude.Args do
   ]
 
   @options_schema NimbleOptions.new!(@schema)
+
+  # The claude-option key names (everything but `:meta`), stringified. A `:meta`
+  # key colliding with one of these would flatten into a live query option, so
+  # `to_map/1` rejects it. Kept consistent with `ObanClaude`'s `@passthrough`.
+  @claude_option_keys @schema |> Keyword.delete(:meta) |> Keyword.keys() |> Enum.map(&to_string/1)
 
   # Same vocabulary as `@schema` but with `:prompt` optional -- for `defaults/1`,
   # which builds worker-level `:args` (the prompt-less case).
@@ -103,11 +112,28 @@ defmodule ObanClaude.Args do
 
   The `:meta` option carries non-claude values (an issue number, a correlation id)
   through to the Oban job args, where `handle_result/2` and telemetry can read
-  them. It is merged untouched (keys stringified) and is not validated as a claude
-  option:
+  them. It is merged flat into the map (keys stringified) and is not validated as
+  a claude option:
 
       ObanClaude.Args.new(prompt: "...", meta: %{"issue" => "173"})
       #=> %{"prompt" => "...", "issue" => "173"}
+
+  Because it is merged flat, `:meta` has two guardrails (both raise at build
+  time):
+
+    * A meta key may not collide with a claude option name (or `"prompt"`) --
+      otherwise it would become an unvalidated query option and could override a
+      worker default across the merge. Rename the key, or set the option directly.
+    * Meta values must be JSON-encodable (Oban stores args as JSON). A tuple or a
+      struct without a `Jason.Encoder` raises here, naming the key, rather than
+      deep inside `Oban.insert`.
+
+  One caveat the guardrails cannot catch: an **atom** meta value is valid JSON
+  but round-trips back as a *string* (`:high` in, `"high"` out). Hand-built
+  `%Oban.Job{args: ...}` test jobs skip that round-trip, so a `handle_result/2`
+  clause matching on the atom passes in tests and silently never matches in
+  production. Use string meta values, and prefer `Oban.Testing.perform_job/3`
+  (which JSON-recodes args) over a hand-built job in worker tests.
 
   ## Validation
 
@@ -159,11 +185,45 @@ defmodule ObanClaude.Args do
 
   # Validated opts -> the string-keyed map. `:meta` is pulled out and merged
   # (stringified) rather than emitted as a claude arg; explicit claude options
-  # overlay it, so they win on a key collision.
+  # overlay it, so they win on a key collision within this call.
   defp to_map(opts) do
     {meta, opts} = Keyword.pop(opts, :meta, %{})
     base = Map.new(opts, fn {key, value} -> {Atom.to_string(key), serialize(value)} end)
-    Map.merge(stringify_keys(meta), base)
+    meta = meta |> stringify_keys() |> validate_meta!()
+    Map.merge(meta, base)
+  end
+
+  # `:meta` is an escape hatch that bypasses the schema, so guard it here (#64):
+  #
+  #   * a meta key that stringifies to a claude option name would flatten into a
+  #     live, UNVALIDATED query option -- and, across the worker merge, silently
+  #     beat that worker's own pinned default. Reject the collision.
+  #   * a value Oban cannot JSON-encode raises deep inside `Oban.insert`, far
+  #     from the mistake. Reject it now, naming the key, per the builder's
+  #     fail-at-construction promise.
+  defp validate_meta!(meta) do
+    for {key, _value} <- meta, key in @claude_option_keys do
+      raise ArgumentError,
+            "meta key #{inspect(key)} collides with the claude option of the same " <>
+              "name. Meta is merged flat into the args, so it would become an " <>
+              "unvalidated query option (and could override a worker default). " <>
+              "Rename the meta key, or set the option directly."
+    end
+
+    for {key, value} <- meta, not json_clean?(value) do
+      raise ArgumentError,
+            "meta value for #{inspect(key)} is not JSON-encodable (#{inspect(value)}). " <>
+              "Oban stores args as JSON -- use strings, numbers, booleans, nil, or " <>
+              "maps/lists of those."
+    end
+
+    meta
+  end
+
+  defp json_clean?(value) do
+    match?({:ok, _}, Jason.encode(value))
+  rescue
+    Protocol.UndefinedError -> false
   end
 
   defp stringify_keys(map) do
