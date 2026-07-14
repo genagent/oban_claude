@@ -13,7 +13,7 @@ defmodule Mix.Tasks.ObanClaude.Run do
 
       mix oban_claude.run "summarize the repo" --working-dir . --permission-mode plan
       mix oban_claude.run "review this" --model sonnet --allowed-tools Read --allowed-tools Grep
-      mix oban_claude.run "extract the facts" --json-schema priv/schema.json --json
+      mix oban_claude.run "extract the facts" --json-schema "$(cat priv/schema.json)" --json
 
   This makes a real (billable) claude call and uses the `claude` CLI's own
   authentication.
@@ -34,7 +34,9 @@ defmodule Mix.Tasks.ObanClaude.Run do
       named one (e.g. `--worktree issue-42`). Needs `--working-dir` to be a git repo.
     * `--hermetic` -- `full` or `project` (or `true`, an alias for `full`): seal
       the ambient `~/.claude` config for a reproducible run
-    * `--json-schema` -- path/string for a structured-output run
+    * `--json-schema` -- an inline JSON Schema *string* for a structured-output
+      run (passed verbatim to the CLI; not a file path -- use
+      `--json-schema "$(cat schema.json)"` to pass a file's contents)
     * `--add-dir`, `--allowed-tools`, `--disallowed-tools`, `--mcp-config` --
       repeatable (pass the flag once per value)
 

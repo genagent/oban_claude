@@ -44,8 +44,12 @@ defmodule ObanClaude.MixProject do
   defp deps do
     [
       {:oban, "~> 2.23"},
-      # The seam onto `claude -p`: a typed Result/Error and query/2.
-      {:claude_wrapper, "~> 0.13"},
+      # The seam onto `claude -p`: a typed Result/Error and query/2. Pinned to
+      # the 0.13.x line: this library hardcodes the wrapper contract (the
+      # @passthrough keys, the permission_mode/effort/hermetic vocabularies, and
+      # the Outcome error kinds), and claude_wrapper has shipped breaking changes
+      # in 0.x minors -- bump deliberately, re-verifying those lists per release.
+      {:claude_wrapper, "~> 0.13.0"},
       # Schema for `ObanClaude.Args`: validates the builder's options and
       # generates their documentation from a single source of truth.
       {:nimble_options, "~> 1.1"},
@@ -53,7 +57,9 @@ defmodule ObanClaude.MixProject do
       # encoder Oban serializes args with), so a bad value fails at construction
       # rather than deep inside `Oban.insert`.
       {:jason, "~> 1.4"},
-      {:telemetry, "~> 1.2"},
+      # `~> 1.3`, not `~> 1.2`: oban `~> 2.23` already requires telemetry 1.3+,
+      # so a 1.2.x floor is unsatisfiable in any valid resolution.
+      {:telemetry, "~> 1.3"},
       # Dev/test only: powers the `mix oban_claude.install` Igniter task. The
       # task module only compiles when Igniter is loaded, so it never ships as a
       # runtime dependency of the library.
@@ -71,7 +77,15 @@ defmodule ObanClaude.MixProject do
   defp package do
     [
       licenses: ["MIT"],
-      links: %{"GitHub" => @source_url}
+      # Hex's default file set omits guides/ and examples/, but the README (the
+      # hexdocs landing page) tells readers to `mix run examples/<name>.exs` --
+      # so ship them.
+      files:
+        ~w(lib .formatter.exs mix.exs README.md LICENSE CHANGELOG.md SPEC.md guides examples),
+      links: %{
+        "GitHub" => @source_url,
+        "Changelog" => "https://hexdocs.pm/oban_claude/changelog.html"
+      }
     ]
   end
 end

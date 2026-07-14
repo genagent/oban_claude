@@ -63,6 +63,9 @@ jobs:
       - name: Docs (warnings as errors)
         run: mix docs --warnings-as-errors
 
+      - name: Audit deps for retirements
+        run: mix hex.audit
+
       - name: Publish
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}

@@ -28,6 +28,15 @@ def deps do
 end
 ```
 
+## Requirements
+
+- **Elixir `~> 1.20`** on **OTP 29**.
+- The **`claude` CLI, installed and authenticated** -- `oban_claude` shells out
+  to it via [`claude_wrapper`](https://hex.pm/packages/claude_wrapper) (pinned to
+  the `0.13.x` line). Run `claude doctor` before your first real job; without a
+  working CLI, runs dead-letter as `{:cancel, :binary_not_found}` or
+  `{:cancel, :auth}`.
+
 ## Use
 
 ```elixir
@@ -296,7 +305,8 @@ atom, which it records as success.
 ## Examples
 
 Runnable, offline scripts (throwaway SQLite-backed Oban, claude stubbed via
-`:query_fun`), each `mix run examples/<name>.exs`:
+`:query_fun`), each `mix run examples/<name>.exs` (they ship in the Hex package,
+or browse them on [GitHub](https://github.com/genagent/oban_claude/tree/main/examples)):
 
 - `playground.exs` -- one job per claude outcome, watch the queue resolve them
   (`:ok` / cancel / retry / snooze).

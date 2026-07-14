@@ -36,7 +36,13 @@ defmodule ObanClaude.Args do
     max_turns: [type: :pos_integer, doc: "Cap on agent turns in the run."],
     max_budget_usd: [type: {:or, [:float, :integer]}, doc: "Cost ceiling for the run, in USD."],
     timeout: [type: :pos_integer, doc: "Subprocess timeout in milliseconds."],
-    json_schema: [type: :string, doc: "A JSON schema string for structured output."],
+    json_schema: [
+      type: :string,
+      doc:
+        "An inline JSON Schema *string* for structured output, passed verbatim to " <>
+          "the CLI's `--json-schema` (not a file path -- read the file yourself and " <>
+          "pass its contents)."
+    ],
     worktree: [
       type: {:or, [:boolean, :string]},
       doc:
@@ -49,9 +55,9 @@ defmodule ObanClaude.Args do
       type: {:in, [:full, :project, true]},
       doc:
         "Seal the ambient `~/.claude` config so the run's surface is exactly what " <>
-          "these args set. `true` is accepted as an alias for `:full`. " <>
           "these args set (`--setting-sources`, `--strict-mcp-config`, " <>
-          "`--exclude-dynamic-system-prompt-sections`; auth untouched). `:full` drops " <>
+          "`--exclude-dynamic-system-prompt-sections`; auth untouched). `true` is an " <>
+          "alias for `:full`. `:full` drops " <>
           "user + project + local ambient config; `:project` seals project + local but " <>
           "keeps the user's global `~/.claude`. Recommended in `defaults/1` for " <>
           "reproducible server runs that should not depend on the host's config."
@@ -61,7 +67,10 @@ defmodule ObanClaude.Args do
       doc:
         "Non-claude metadata merged into the args map untouched (keys stringified). " <>
           "For values `handle_result/2` or telemetry needs -- an issue number, a " <>
-          "correlation id. Explicit claude options win on a key collision."
+          "correlation id. Explicit claude options win on a key collision. Note: " <>
+          "meta set as a *worker default* (via `defaults/1`) reaches telemetry (the " <>
+          "merged args) but NOT `handle_result/2`, which sees only the job's own " <>
+          "args -- put meta a handler reads on the job, not the worker default."
     ]
   ]
 
