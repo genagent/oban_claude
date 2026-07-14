@@ -73,6 +73,36 @@ defmodule ObanClaude.WorkerTest do
     def handle_result(result, _job), do: {:ok, result.result}
   end
 
+  defmodule ClassifierWorker do
+    use ObanClaude.Worker,
+      queue: :test,
+      query_fun: &ObanClaude.WorkerTest.query_ok/2,
+      classifier: &__MODULE__.classify/1
+
+    # A worker-level classifier, returning the required {oban_return, payload}
+    # envelope. Defers everything but the overridden case to the default mapping.
+    def classify({:ok, %Result{} = r}), do: {{:cancel, :always}, r}
+    def classify(outcome), do: ObanClaude.Outcome.classify(outcome)
+  end
+
+  defmodule FlatClassifierWorker do
+    use ObanClaude.Worker,
+      queue: :test,
+      query_fun: &ObanClaude.WorkerTest.query_ok/2,
+      classifier: &__MODULE__.classify/1
+
+    # The classic mistake: a flat verdict instead of the envelope. run/2 must
+    # reject it rather than let Oban record the failed job as success.
+    def classify(_outcome), do: {:cancel, :always}
+  end
+
+  defmodule PerformOverrideWorker do
+    use ObanClaude.Worker, queue: :test
+
+    @impl Oban.Worker
+    def perform(%Oban.Job{}), do: {:cancel, :overridden}
+  end
+
   defp job(args), do: %Oban.Job{args: args}
 
   test "the default handle_result/2 returns :ok on a clean result" do
@@ -108,5 +138,19 @@ defmodule ObanClaude.WorkerTest do
     assert captured =~ ~s("hi")
     assert captured =~ ~s(model: "haiku")
     assert captured =~ ~s(system_prompt: "fixed")
+  end
+
+  test "a worker-level :classifier's verdict flows through perform/1 (nested envelope)" do
+    assert {:cancel, :always} = ClassifierWorker.perform(job(%{"prompt" => "x"}))
+  end
+
+  test "a worker whose classifier returns a flat verdict raises through perform/1" do
+    assert_raise ArgumentError, ~r/envelope/, fn ->
+      FlatClassifierWorker.perform(job(%{"prompt" => "x"}))
+    end
+  end
+
+  test "perform/1 is overridable" do
+    assert {:cancel, :overridden} = PerformOverrideWorker.perform(job(%{"prompt" => "x"}))
   end
 end

@@ -122,6 +122,13 @@ defmodule ObanClaude.Args do
   #{NimbleOptions.docs(@options_schema)}
   """
 
+  @typedoc """
+  The string-keyed args map the builder produces and `ObanClaude.run/2`
+  consumes -- what Oban serializes as the job's args. Keys are strings (claude
+  options plus any stringified `:meta`); values are JSON-clean.
+  """
+  @type t :: %{optional(String.t()) => term()}
+
   @doc """
   Build a string-keyed args map from a keyword list of atom-keyed options.
 
@@ -129,7 +136,7 @@ defmodule ObanClaude.Args do
   `NimbleOptions.ValidationError` on a missing `:prompt`, an unknown key, or a
   value of the wrong type. Returns the map Oban serializes as the job's args.
   """
-  @spec new(keyword) :: %{required(String.t()) => term()}
+  @spec new(keyword) :: t()
   def new(opts) when is_list(opts) do
     opts |> NimbleOptions.validate!(@options_schema) |> to_map()
   end
@@ -141,7 +148,7 @@ defmodule ObanClaude.Args do
   Because it evaluates at compile time, it can be used directly in the worker's
   `use` (see "Worker defaults" above).
   """
-  @spec defaults(keyword) :: %{optional(String.t()) => term()}
+  @spec defaults(keyword) :: t()
   def defaults(opts \\ []) when is_list(opts) do
     opts |> NimbleOptions.validate!(@defaults_schema) |> to_map()
   end

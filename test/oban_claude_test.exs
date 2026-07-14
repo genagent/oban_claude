@@ -15,9 +15,26 @@ defmodule ObanClaudeTest do
       assert {{:error, :result_error}, ^r} = Outcome.classify({:ok, r})
     end
 
-    test "timeout snoozes" do
+    test "timeout retries bounded by max_attempts (never snooze)" do
       e = %Error{kind: :timeout}
-      assert {{:snooze, _}, ^e} = Outcome.classify({:error, e})
+      assert {{:error, :timeout}, ^e} = Outcome.classify({:error, e})
+    end
+
+    test "a rate-limit :auth error retries (bounded) rather than cancelling" do
+      e = %Error{kind: :auth, reason: :rate_limit}
+      assert {{:error, :rate_limit}, ^e} = Outcome.classify({:error, e})
+    end
+
+    test "the real missing/unrunnable-binary :io shape cancels as :binary_not_found" do
+      for reason <- [:enoent, :eacces] do
+        e = %Error{kind: :io, reason: {:io, %ErlangError{original: reason}}}
+        assert {{:cancel, :binary_not_found}, ^e} = Outcome.classify({:error, e})
+      end
+    end
+
+    test "a generic :io error (not enoent/eacces) still retries" do
+      e = %Error{kind: :io, reason: {:io, %ErlangError{original: :closed}}}
+      assert {{:error, :io}, ^e} = Outcome.classify({:error, e})
     end
 
     test "config/env faults and rail-stops cancel (no blind retry)" do
@@ -151,11 +168,20 @@ defmodule ObanClaudeTest do
     test "the :classifier option overrides the default mapping" do
       result = %Result{result: "hi", is_error: false}
 
-      assert {:cancel, :always} =
+      assert {{:cancel, :always}, ^result} =
                ObanClaude.run(%{"prompt" => "x"},
                  query_fun: fn _p, _o -> {:ok, result} end,
-                 classifier: fn _ -> {:cancel, :always} end
+                 classifier: fn {:ok, r} -> {{:cancel, :always}, r} end
                )
+    end
+
+    test "raises when a classifier returns a flat verdict instead of the envelope" do
+      assert_raise ArgumentError, ~r/\{oban_return, payload\} envelope/, fn ->
+        ObanClaude.run(%{"prompt" => "x"},
+          query_fun: fn _p, _o -> {:ok, %Result{result: "", is_error: false}} end,
+          classifier: fn _ -> {:cancel, :always} end
+        )
+      end
     end
 
     test "requires a prompt" do
