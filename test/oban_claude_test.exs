@@ -126,6 +126,28 @@ defmodule ObanClaudeTest do
       end
     end
 
+    test "coerces hermetic from a JSON string to the scope atom claude expects" do
+      pid = self()
+
+      qf = fn _p, opts ->
+        send(pid, {:opts, opts})
+        {:ok, %Result{result: "", is_error: false}}
+      end
+
+      ObanClaude.run(%{"prompt" => "x", "hermetic" => "project"}, query_fun: qf)
+
+      assert_received {:opts, opts}
+      assert opts[:hermetic] == :project
+    end
+
+    test "raises a helpful error on an unknown hermetic scope" do
+      qf = fn _p, _o -> {:ok, %Result{result: "", is_error: false}} end
+
+      assert_raise ArgumentError, ~r/unknown hermetic/, fn ->
+        ObanClaude.run(%{"prompt" => "x", "hermetic" => "bare"}, query_fun: qf)
+      end
+    end
+
     test "the :classifier option overrides the default mapping" do
       result = %Result{result: "hi", is_error: false}
 

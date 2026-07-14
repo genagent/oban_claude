@@ -144,6 +144,26 @@ defmodule ObanClaude.ArgsTest do
     end
   end
 
+  describe "hermetic" do
+    test ":full and :project serialize to their string wire form" do
+      assert Args.new(prompt: "x", hermetic: :full)["hermetic"] == "full"
+      assert Args.new(prompt: "x", hermetic: :project)["hermetic"] == "project"
+    end
+
+    test "is available in defaults/1 for a reproducible per-worker seal" do
+      assert Args.defaults(working_dir: "/repo", hermetic: :full) == %{
+               "working_dir" => "/repo",
+               "hermetic" => "full"
+             }
+    end
+
+    test "rejects a scope outside the vocabulary" do
+      assert_raise NimbleOptions.ValidationError, ~r/invalid value for :hermetic/, fn ->
+        Args.new(prompt: "x", hermetic: :bare)
+      end
+    end
+  end
+
   describe "round-trip through run/2" do
     test "every emitted key survives build/1 and the enums reconstruct as atoms" do
       pid = self()
@@ -158,6 +178,7 @@ defmodule ObanClaude.ArgsTest do
         model: "sonnet",
         permission_mode: :plan,
         effort: :high,
+        hermetic: :full,
         allowed_tools: ["Read"],
         worktree: "issue-5"
       )
@@ -167,6 +188,7 @@ defmodule ObanClaude.ArgsTest do
       assert opts[:model] == "sonnet"
       assert opts[:permission_mode] == :plan
       assert opts[:effort] == :high
+      assert opts[:hermetic] == :full
       assert opts[:allowed_tools] == ["Read"]
       assert opts[:worktree] == "issue-5"
     end
