@@ -114,6 +114,17 @@ defmodule ObanClaude.WorkerTest do
     def handle_result(result, _job), do: {:ok, result.result}
   end
 
+  defmodule SnoozeWorker do
+    use ObanClaude.Worker,
+      queue: :test,
+      query_fun: &ObanClaude.WorkerTest.query_ok/2,
+      classifier: &__MODULE__.classify/1
+
+    # A classifier that opts into snooze (the default mapping never does).
+    def classify({:ok, %Result{} = r}), do: {{:snooze, 30}, r}
+    def classify(outcome), do: ObanClaude.Outcome.classify(outcome)
+  end
+
   defp job(args), do: %Oban.Job{args: args}
 
   test "the default handle_result/2 returns :ok on a clean result" do
@@ -164,6 +175,10 @@ defmodule ObanClaude.WorkerTest do
 
   test "perform/1 is overridable" do
     assert {:cancel, :overridden} = PerformOverrideWorker.perform(job(%{"prompt" => "x"}))
+  end
+
+  test "a {:snooze, n} verdict passes through perform/1 to Oban" do
+    assert {:snooze, 30} = SnoozeWorker.perform(job(%{"prompt" => "x"}))
   end
 
   test "pinned_args win over job args, while non-pinned defaults still yield to the job" do

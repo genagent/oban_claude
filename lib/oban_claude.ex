@@ -113,9 +113,15 @@ defmodule ObanClaude do
   # Args-map keys passed straight through to `ClaudeWrapper.query/2`. Kept a
   # superset of `ObanClaude.Args`'s curated keys, or a key the constructor emits
   # would be silently dropped when `build/1` assembles the query opts.
+  #
+  # `binary` (a claude CLI path) rides through for per-worker version pinning.
+  # The sibling wrapper key `:env` is deliberately NOT surfaced: env vars in the
+  # args map would sit plaintext in the oban_jobs table (a secrets-at-rest
+  # hazard) -- resolve env inside the run instead.
   @passthrough ~w(model max_turns max_budget_usd working_dir permission_mode timeout
                   system_prompt append_system_prompt fallback_model add_dir json_schema
-                  allowed_tools disallowed_tools mcp_config effort agent worktree hermetic)
+                  allowed_tools disallowed_tools mcp_config effort agent worktree hermetic
+                  binary)
 
   # String key -> atom key, resolved at COMPILE time so the atoms always exist.
   # `String.to_existing_atom/1` would depend on ClaudeWrapper.Query (the module

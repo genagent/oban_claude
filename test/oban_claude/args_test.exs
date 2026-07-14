@@ -196,32 +196,56 @@ defmodule ObanClaude.ArgsTest do
   end
 
   describe "round-trip through run/2" do
-    test "every emitted key survives build/1 and the enums reconstruct as atoms" do
+    test "EVERY Args key (minus :meta) survives build/1 into the query opts" do
+      # A valid value for every builder option. The equality assertion below
+      # forces this list to stay exhaustive: add a key to the schema and this
+      # test fails until it is represented here -- which is the whole guard, so a
+      # key added to Args but not @passthrough can never be silently dropped.
+      opts = [
+        prompt: "do it",
+        model: "sonnet",
+        fallback_model: "haiku",
+        working_dir: "/repo",
+        binary: "/opt/claude/1.2.3/claude",
+        add_dir: ["/x"],
+        system_prompt: "sys",
+        append_system_prompt: "more",
+        permission_mode: :plan,
+        allowed_tools: ["Read"],
+        disallowed_tools: ["WebFetch"],
+        mcp_config: ["/mcp.json"],
+        agent: "reviewer",
+        effort: :high,
+        max_turns: 3,
+        max_budget_usd: 2.0,
+        timeout: 60_000,
+        json_schema: ~s({"type":"object"}),
+        worktree: "issue-5",
+        hermetic: :full
+      ]
+
+      assert Enum.sort(Keyword.keys(opts)) == Enum.sort(Args.keys() -- [:meta])
+
       pid = self()
 
-      qf = fn prompt, opts ->
-        send(pid, {:queried, prompt, opts})
+      qf = fn prompt, query_opts ->
+        send(pid, {:queried, prompt, query_opts})
         {:ok, %Result{result: "", is_error: false}}
       end
 
-      Args.new(
-        prompt: "do it",
-        model: "sonnet",
-        permission_mode: :plan,
-        effort: :high,
-        hermetic: :full,
-        allowed_tools: ["Read"],
-        worktree: "issue-5"
-      )
-      |> ObanClaude.run(query_fun: qf)
+      opts |> Args.new() |> ObanClaude.run(query_fun: qf)
 
-      assert_received {:queried, "do it", opts}
-      assert opts[:model] == "sonnet"
-      assert opts[:permission_mode] == :plan
-      assert opts[:effort] == :high
-      assert opts[:hermetic] == :full
-      assert opts[:allowed_tools] == ["Read"]
-      assert opts[:worktree] == "issue-5"
+      assert_received {:queried, "do it", query_opts}
+
+      # Every non-prompt key reached the query opts -- nothing silently dropped.
+      for key <- Keyword.keys(opts), key != :prompt do
+        assert Keyword.has_key?(query_opts, key), "build/1 dropped #{inspect(key)}"
+      end
+
+      # And the enums reconstruct as atoms.
+      assert query_opts[:permission_mode] == :plan
+      assert query_opts[:effort] == :high
+      assert query_opts[:hermetic] == :full
     end
 
     test "meta keys are carried in the args but ignored by the query build" do

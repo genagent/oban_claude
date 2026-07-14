@@ -165,6 +165,14 @@ defmodule ObanClaudeTest do
       end
     end
 
+    test "raises a helpful error on an unknown effort" do
+      qf = fn _p, _o -> {:ok, %Result{result: "", is_error: false}} end
+
+      assert_raise ArgumentError, ~r/unknown effort/, fn ->
+        ObanClaude.run(%{"prompt" => "x", "effort" => "extreme"}, query_fun: qf)
+      end
+    end
+
     test "the :classifier option overrides the default mapping" do
       result = %Result{result: "hi", is_error: false}
 
@@ -337,6 +345,18 @@ defmodule ObanClaudeTest do
       r = %Result{result: "x", is_error: false}
       assert ObanClaude.structured(r) == nil
       assert ObanClaude.outcome(r) == nil
+    end
+
+    test "outcome/1 is nil when the structured outcome is not a string" do
+      r = %Result{
+        result: "",
+        is_error: false,
+        extra: %{"structured_output" => %{"outcome" => 123}}
+      }
+
+      assert ObanClaude.outcome(r) == nil
+      # the object itself is still readable via structured/1
+      assert ObanClaude.structured(r) == %{"outcome" => 123}
     end
   end
 end
