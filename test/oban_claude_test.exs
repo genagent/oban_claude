@@ -34,6 +34,7 @@ defmodule ObanClaudeTest do
         :git_unavailable,
         # rail-stops: the rails deliberately halted the run
         :budget_exceeded,
+        :max_budget_exceeded,
         :max_turns_exceeded
       ]
 

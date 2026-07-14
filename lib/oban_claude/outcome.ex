@@ -12,7 +12,7 @@ defmodule ObanClaude.Outcome do
   | `%Error{kind: :timeout}`             | `{:snooze, 30}`  | transient; back off and retry soon |
   | `%Error{kind: :command_failed/:json/:io}` | `{:error, kind}` | likely transient infra; retry with backoff |
   | a config/env fault (see below)       | `{:cancel, kind}` | the same broken environment re-fails identically; a retry only burns budget |
-  | `%Error{kind: :budget_exceeded/:max_turns_exceeded}` | `{:cancel, kind}` | the rails stopped it; resuming is a deliberate act, not a blind retry |
+  | `%Error{kind: :budget_exceeded/:max_budget_exceeded/:max_turns_exceeded}` | `{:cancel, kind}` | the rails stopped it; resuming is a deliberate act, not a blind retry |
   | any other typed `%Error{}`           | `{:error, kind}` | unknown but typed; retry under `max_attempts`, then dead-letter |
   | a non-`%Error{}` error term          | `{:cancel, ...}` | off-contract and unclassifiable; do not blindly re-run |
 
@@ -24,10 +24,11 @@ defmodule ObanClaude.Outcome do
   git fails the same way on every attempt, so retrying cannot help and only
   delays the dead-letter.
 
-  The `:budget_exceeded` and `:max_turns_exceeded` rows are the genuinely
-  app-dependent ones -- an app whose worker resumes via a pinned `--session-id`
-  may prefer `{:snooze, n}` or `{:error, ...}` there. That is exactly what the
-  `:classifier` override is for.
+  The rail-stop rows -- `:budget_exceeded` (a client-side ceiling),
+  `:max_budget_exceeded` (claude's own `--max-budget-usd` cap), and
+  `:max_turns_exceeded` -- are the genuinely app-dependent ones. An app whose
+  worker resumes via a pinned `--session-id` may prefer `{:snooze, n}` or
+  `{:error, ...}` there. That is exactly what the `:classifier` override is for.
 
   An `{:error, term}` that is not a typed `%Error{}` (off the documented
   contract, e.g. a custom `:query_fun` routing through
@@ -59,7 +60,10 @@ defmodule ObanClaude.Outcome do
   # The rails deliberately stopped a run that was otherwise progressing. A blind
   # retry just re-burns the same budget or turn ceiling; resuming a pinned
   # `--session-id` is a deliberate act for the app (override the classifier).
-  @rail_stops [:budget_exceeded, :max_turns_exceeded]
+  # `:budget_exceeded` is the client-side ceiling; `:max_budget_exceeded` is
+  # claude's own `--max-budget-usd` cap. Both stop the same way -- retrying
+  # re-burns the spend -- so both cancel.
+  @rail_stops [:budget_exceeded, :max_budget_exceeded, :max_turns_exceeded]
 
   @doc "Map `ClaudeWrapper.query/2`'s return onto `{oban_return, term}`."
   @spec classify({:ok, Result.t()} | {:error, term()}) ::
