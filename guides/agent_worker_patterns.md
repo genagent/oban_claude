@@ -10,9 +10,9 @@ and auditing itself).
 `oban_claude` stays a thin seam: it runs one claude turn per job and maps the
 result onto an Oban return. Everything below is composition on top of that.
 
-## The three pillars of an unattended worker
+## The pillars of an unattended worker
 
-A job runs with no human watching, so a full-auto worker needs three things.
+A job runs with no human watching, so a full-auto worker needs four things.
 
 1. **Isolation.** Run in a git worktree so concurrent jobs never collide in one
    working copy. Set it in the worker defaults:
@@ -45,12 +45,31 @@ A job runs with no human watching, so a full-auto worker needs three things.
    notification or watch CI, even if repository conventions say to.
    ```
 
-Those three pillars keep a *single* job well-behaved. Running a *fleet* of them
-unattended adds four more concerns, each a real footgun covered at the end of
-this guide: [Retries cost money](#retries-cost-money-and-may-repeat-writes),
+4. **Sealed config (`hermetic: :full`).** By default a run *also* loads the host
+   user's `~/.claude` and the target repo's project/local config -- settings-file
+   allow rules, hooks, ambient MCP servers. On a shared host an allowlisted
+   `Bash` in someone's `~/.claude` silently grants a "read-only" worker
+   write/exec; and a PR author who edits the repo's `.claude` pulls their config
+   into the agent. `hermetic: :full` seals all of it (`--setting-sources`,
+   `--strict-mcp-config`, `--exclude-dynamic-system-prompt-sections`; auth is
+   untouched), so the run's surface is exactly what these args set. Set it in the
+   defaults for any fleet worker:
+
+   ```elixir
+   use ObanClaude.Worker,
+     queue: :agents,
+     args: ObanClaude.Args.defaults(working_dir: "/repo", worktree: true, hermetic: :full)
+   ```
+
+Those four pillars keep a *single* job well-behaved. Running a *fleet* of them
+unattended adds more concerns, each a real footgun covered at the end of this
+guide: [Retries cost money](#retries-cost-money-and-may-repeat-writes),
 [Timeouts and stuck runs](#timeouts-and-stuck-runs),
 [Process lifecycle](#process-lifecycle-kill-the-cli-not-just-the-task),
-[Deploys and crash recovery](#deploys-and-crash-recovery), and
+[Deploys and crash recovery](#deploys-and-crash-recovery),
+[Fleet cost controls](#fleet-cost-controls),
+[Data handling](#data-handling),
+[Worktree hygiene](#worktree-hygiene), and
 [Untrusted input](#untrusted-input).
 
 ## Issue-work worker: issue -> draft PR
@@ -118,19 +137,25 @@ or the diff is wrong. Review-then-merge, autonomous on clean.
 ## Read-only audit worker (propose / dispose)
 
 Not every worker writes. A read-only worker runs the agent under
-`permission_mode: :default` (non-interactive = writes blocked) and returns a
-typed verdict via `--json-schema`. This is the propose/dispose split: the agent
-*proposes* structured findings; `handle_result/2` *disposes* of them.
+`permission_mode: :default` and returns a typed verdict via `--json-schema`.
+This is the propose/dispose split: the agent *proposes* structured findings;
+`handle_result/2` *disposes* of them.
+
+`permission_mode: :default` blocks writes **only if no ambient allow rule
+pre-approves them** -- an allowlisted `Bash`/`Edit` in the host's `~/.claude` or
+the repo's `.claude` auto-approves without a prompt even in non-interactive mode.
+Add `hermetic: :full` to make "read-only" unconditional (it seals that ambient
+config away), and pin *both* so an inserted job can't escalate:
 
 ```elixir
 defmodule MyApp.AuditWorker do
   use ObanClaude.Worker,
     queue: :audit,
     args: ObanClaude.Args.defaults(working_dir: "/repo", append_system_prompt: "…read-only, single-turn…"),
-    # `permission_mode` is this worker's safety property, so pin it: `:pinned_args`
-    # merges over the job, so an inserted job cannot escalate to full-write by
-    # supplying its own `permission_mode`. (In `:args` it would only be a default.)
-    pinned_args: ObanClaude.Args.defaults(permission_mode: :default)
+    # permission_mode + hermetic are this worker's safety properties, so pin
+    # them: :pinned_args merges over the job, so an inserted job cannot escalate
+    # to full-write (or unseal the config) by supplying its own value.
+    pinned_args: ObanClaude.Args.defaults(permission_mode: :default, hermetic: :full)
 
   @impl ObanClaude.Worker
   def handle_result(result, _job) do
@@ -353,3 +378,76 @@ For externally triggered work:
   (delimit it and tell the model it is untrusted data, not instructions), pin
   `disallowed_tools`, seal the environment with `hermetic: :full`, run under an
   OS user with minimal credentials, and require human review before merge.
+
+## Fleet cost controls
+
+`max_budget_usd` bounds one attempt; nothing bounds *N* runaway jobs (a
+mis-configured poller, a hostile burst). oban_claude owns no state, so a
+fleet-wide ceiling is an app-owned handler wiring three pieces it already gives
+you: the `cost_usd` on every telemetry event, `ClaudeWrapper.Budget` (a
+self-contained accumulator with `max_usd` / `on_exceeded`), and `Oban.pause_queue/2`.
+
+```elixir
+# Attach once at boot against a started ClaudeWrapper.Budget.
+def attach(budget) do
+  events = [[:oban_claude, :run, :stop], [:oban_claude, :run, :exception]]
+  :telemetry.attach_many("claude-budget", events, &__MODULE__.record/4, budget)
+end
+
+# :exception carries cost_usd for rail-stop runs (0.0 otherwise), so summing
+# BOTH events counts the capped runs -- a :stop-only ledger undercounts.
+def record(_event, measurements, _meta, budget) do
+  ClaudeWrapper.Budget.record(budget, measurements[:cost_usd] || 0.0)
+end
+```
+
+Start the `Budget` with `on_exceeded: fn _ -> Oban.pause_queue(queue: :claude) end`,
+and reset + `Oban.resume_queue/2` from a daily `Oban.Plugins.Cron` job. Per-queue
+(rather than global) ledgers key on the `:job` metadata now on every event
+(`meta.job.queue`). Anything with real policy -- persistence, multiple ledgers,
+alerting -- belongs in a companion package, not here.
+
+## Data handling
+
+Job args are stored **verbatim as JSON** in the `oban_jobs` row -- the full
+prompt, `system_prompt`, and every `:meta` value -- and kept until
+`Oban.Plugins.Pruner` removes them, or **forever** if it is not configured
+(Oban's default is `plugins: []`; the installer scaffolds none). The same args
+map rides on every telemetry event, so a logging handler can write prompt
+contents into your log pipeline; and claude_wrapper passes the prompt as argv,
+so it is visible in `ps` to any local user on the host while a run is active.
+
+- **Never put secrets or PII in a prompt or `:meta`.** Pass a *reference* and let
+  the agent resolve it inside the run via its own env/tooling.
+- **Configure `Oban.Plugins.Pruner`** with a `max_age` sized to the data's
+  sensitivity -- otherwise args sit queryable in the DB, in Oban Web, and in
+  every backup indefinitely.
+- **Redact** `:args` / `:result` / `:error` telemetry metadata before shipping it
+  to a log aggregator.
+- Size **host trust** accordingly -- argv is world-readable in `ps`.
+
+## Worktree hygiene
+
+oban_claude passes `worktree` through to the CLI, which *creates* the worktree --
+but nothing in the stack *removes* one. Two paths leak:
+
+- **Ephemeral worktrees on a killed run.** `worktree: true` is cleaned up only
+  when the CLI reaches end-of-run. An Oban timeout, `cancel_job`, deploy, or
+  crash -- and forcola's kill-the-tree-on-timeout -- skips that, leaking a full
+  checkout + branch + `.git/worktrees` metadata each time, until an unattended
+  fleet fills the disk. Run a cron-scheduled maintenance job that lists
+  worktrees (`ClaudeWrapper.Worktrees.for_repo/1`) and `git worktree remove
+  --force`s aged, non-`main` ones.
+- **Two jobs in one named worktree.** A named worktree assumes **at most one job
+  touches it at a time**. A timeout-retry under the default runner (the orphan
+  keeps writing), a Lifeline rescue, or an operator re-enqueue breaks that --
+  two git agents contend on `index.lock` and interleave commits. Guard workers
+  that take a named worktree with a `unique` on the worktree key, and pair it
+  with forcola so a superseded run cannot still be writing:
+
+  ```elixir
+  use ObanClaude.Worker,
+    queue: :pipeline,
+    unique: [fields: [:args], keys: [:worktree],
+             states: [:available, :scheduled, :executing, :retryable]]
+  ```

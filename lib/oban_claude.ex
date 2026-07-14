@@ -147,8 +147,9 @@ defmodule ObanClaude do
 
   Returns `{oban_return, %Result{} | %Error{}}` so a caller can both act on the
   Oban verdict and inspect the underlying run (cost, session id, structured
-  output). `:prompt` is required; every key in `@passthrough` is forwarded to
-  `ClaudeWrapper.query/2`.
+  output). `:prompt` is required; a curated subset of `ClaudeWrapper.query/2`
+  options (the keys in the `ObanClaude.Args` options table) is forwarded, and any
+  other key in the map is silently ignored.
 
   Options:
 

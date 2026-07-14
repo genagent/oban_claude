@@ -59,9 +59,12 @@ end
 |> Oban.insert()
 ```
 
-The job args are the spec: `prompt` (required) plus any `claude_wrapper` query
-option (`model`, `max_turns`, `max_budget_usd`, `working_dir`, `permission_mode`,
-`timeout`, ...). Args are JSON, so atom-valued options are given as strings:
+The job args are the spec: `prompt` (required) plus a **curated subset** of
+`claude_wrapper` query options (`model`, `max_turns`, `max_budget_usd`,
+`working_dir`, `permission_mode`, `timeout`, ...) -- the exact set is the
+`ObanClaude.Args` options table. Query options outside that set (e.g.
+`session_id`, `resume`) are not forwarded, and unknown raw-map keys are silently
+ignored. Args are JSON, so atom-valued options are given as strings:
 `permission_mode` is `"bypass_permissions"`, coerced to the atom for you.
 
 In `handle_result/2`, `ObanClaude.outcome/1` reads the `"outcome"` key of a
@@ -146,10 +149,13 @@ use ObanClaude.Worker,
   args: ObanClaude.Args.defaults(working_dir: "/repo", worktree: true)
 ```
 
-- `worktree: true` -- an ephemeral worktree per run.
+- `worktree: true` -- an ephemeral worktree per run. The CLI removes it at
+  end-of-run, but a killed run (Oban timeout, `cancel_job`, deploy, crash) skips
+  that cleanup and leaks the checkout -- see [Worktree hygiene](agent_worker_patterns.html#worktree-hygiene).
 - `worktree: "issue-173"` (per job) -- a **named** worktree, reusable across jobs.
   A per-job value overrides the worker default, so a chain of jobs for one issue
-  can share a worktree by passing the same name.
+  can share a worktree by passing the same name (assumes at most one job touches
+  it at a time -- guard with `unique`, see the guide).
 
 It requires `working_dir` to be a git repo, so it is opt-in (a read-only or
 non-repo job would fail `--worktree`). The installer's sample worker enables it.
@@ -168,6 +174,8 @@ make an unattended, one-shot job reliable:
   must tell the agent to finish at the draft PR and never wait on CI -- otherwise
   it can park waiting for a notification that never comes (a user-prompt
   instruction loses to the repo's own conventions).
+- **Seal the config** with `hermetic: :full` so the run doesn't inherit the host's
+  `~/.claude` or the repo's `.claude` (allow rules, hooks, ambient MCP servers).
 
 ```elixir
 defmodule MyApp.IssueWorker do
@@ -179,6 +187,7 @@ defmodule MyApp.IssueWorker do
         working_dir: "/repo",
         permission_mode: :bypass_permissions,
         worktree: true,
+        hermetic: :full,
         max_turns: 40,
         max_budget_usd: 2.0,
         append_system_prompt:

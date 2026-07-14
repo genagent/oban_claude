@@ -58,9 +58,11 @@ defmodule ObanClaude.Outcome do
 
   The rail-stop rows -- `:budget_exceeded` (a client-side ceiling),
   `:max_budget_exceeded` (claude's own `--max-budget-usd` cap), and
-  `:max_turns_exceeded` -- are the genuinely app-dependent ones. An app whose
-  worker resumes via a pinned `--session-id` may prefer `{:error, ...}` there.
-  That is exactly what the `:classifier` override is for.
+  `:max_turns_exceeded` -- are the genuinely app-dependent ones. An app that
+  resumes the run rather than restarting it may prefer `{:error, ...}` (or a
+  bounded snooze) there. That is what the `:classifier` override is for. Note the
+  args map does not yet forward `session_id`/`resume`, so resuming a pinned
+  session today requires a custom `:query_fun`.
 
   An `{:error, term}` that is not a typed `%Error{}` (off the documented
   contract, e.g. a custom `:query_fun` routing through
