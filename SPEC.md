@@ -77,8 +77,10 @@ String keys (Oban args are JSON). `build/1` converts them with
 See `ObanClaude.Outcome` for the table. The two app-dependent rows are
 `:budget_exceeded` and `:max_turns_exceeded` -- the default `{:cancel, ...}` is
 the safe choice (the rails stopped it; a blind retry re-hits). An app whose
-worker resumes a pinned `--session-id` may override those to `{:snooze, n}` or
-`{:error, ...}`.
+worker resumes reads the `session_id` off the rail-stop `%Error{}` in
+`handle_error/3` (via `ObanClaude.session_id/1`) and enqueues a follow-on job
+with `resume:` + the same named worktree; a classifier override can additionally
+change the verdict to `{:snooze, n}` or `{:error, ...}`.
 
 > DECISION TO REVISIT: is the default `:cancel` for max_turns right, or should it
 > be `{:error, ...}` (retry) on the assumption the tree is usually complete (the

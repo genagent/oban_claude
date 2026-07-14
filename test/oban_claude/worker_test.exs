@@ -18,6 +18,11 @@ defmodule ObanClaude.WorkerTest do
 
   def query_auth(_prompt, _opts), do: {:error, %Error{kind: :auth}}
 
+  # A rail stop carrying the money + resume handle in its reason map.
+  def query_rail(_prompt, _opts),
+    do:
+      {:error, %Error{kind: :max_budget_exceeded, reason: %{session_id: "sess-9", cost_usd: 1.5}}}
+
   # Encodes the prompt and query opts run/2 produced into the result, so a test
   # can inspect what the worker merged and passed through.
   def echo(prompt, opts),
@@ -125,6 +130,25 @@ defmodule ObanClaude.WorkerTest do
     def classify(outcome), do: ObanClaude.Outcome.classify(outcome)
   end
 
+  defmodule RailWorker do
+    # No handle_error/3 override: proves the injected default is a pure passthrough
+    # even when a payload is present (the verdict reaches Oban unchanged).
+    use ObanClaude.Worker, queue: :test, query_fun: &ObanClaude.WorkerTest.query_rail/2
+  end
+
+  defmodule ResumeWorker do
+    use ObanClaude.Worker, queue: :test, query_fun: &ObanClaude.WorkerTest.query_rail/2
+
+    # handle_error/3 now SEES the %Error{} payload run/2 used to drop, and reads the
+    # resume handle + spend through the seam readers (no wrapper-struct knowledge).
+    @impl ObanClaude.Worker
+    def handle_error({:cancel, :max_budget_exceeded}, %Error{} = error, _job) do
+      {:cancel, {:rail, ObanClaude.session_id(error), ObanClaude.cost_usd(error)}}
+    end
+
+    def handle_error(oban_return, _payload, _job), do: oban_return
+  end
+
   defp job(args), do: %Oban.Job{args: args}
 
   test "the default handle_result/2 returns :ok on a clean result" do
@@ -179,6 +203,16 @@ defmodule ObanClaude.WorkerTest do
 
   test "a {:snooze, n} verdict passes through perform/1 to Oban" do
     assert {:snooze, 30} = SnoozeWorker.perform(job(%{"prompt" => "x"}))
+  end
+
+  describe "handle_error/3 (#79)" do
+    test "the injected default returns the verdict unchanged, payload notwithstanding" do
+      assert {:cancel, :max_budget_exceeded} = RailWorker.perform(job(%{"prompt" => "x"}))
+    end
+
+    test "an override receives the dropped %Error{} payload and reads it via the seam" do
+      assert {:cancel, {:rail, "sess-9", 1.5}} = ResumeWorker.perform(job(%{"prompt" => "x"}))
+    end
   end
 
   test "pinned_args win over job args, while non-pinned defaults still yield to the job" do

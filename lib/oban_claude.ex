@@ -115,13 +115,20 @@ defmodule ObanClaude do
   # would be silently dropped when `build/1` assembles the query opts.
   #
   # `binary` (a claude CLI path) rides through for per-worker version pinning.
+  # The session keys (`resume`, `session_id`, `no_session_persistence`,
+  # `fork_session`) enable the resume-after-rail-stop recipe (read the
+  # `session_id` off the rail-stop `%Error{}` in `handle_error/3`, then enqueue a
+  # follow-on job with `resume:` + the same named worktree). All are JSON-clean
+  # strings/booleans, so they need no coercion. `continue_session` is
+  # deliberately excluded: `--continue` resumes the host's *most recent* session,
+  # which cross-contaminates under concurrent workers; use explicit `resume:`.
   # The sibling wrapper key `:env` is deliberately NOT surfaced: env vars in the
   # args map would sit plaintext in the oban_jobs table (a secrets-at-rest
   # hazard) -- resolve env inside the run instead.
   @passthrough ~w(model max_turns max_budget_usd working_dir permission_mode timeout
                   system_prompt append_system_prompt fallback_model add_dir json_schema
                   allowed_tools disallowed_tools mcp_config effort agent worktree hermetic
-                  binary)
+                  binary resume session_id no_session_persistence fork_session)
 
   # String key -> atom key, resolved at COMPILE time so the atoms always exist.
   # `String.to_existing_atom/1` would depend on ClaudeWrapper.Query (the module
@@ -215,6 +222,38 @@ defmodule ObanClaude do
       _ -> nil
     end
   end
+
+  @doc """
+  Read the claude session id from a run's payload, or `nil` if there is none.
+
+  The handle lives in two different places depending on the outcome, and this
+  reader hides that split so callers never touch `claude_wrapper` internals:
+
+    * on a success (or `is_error` `%Result{}`), it is `result.session_id`;
+    * on a rail-stop `%Error{}` (`:max_turns_exceeded` / `:max_budget_exceeded`),
+      it is `error.reason.session_id`.
+
+  Use it inside `c:ObanClaude.Worker.handle_error/3` to enqueue a `resume:` job
+  after a rail stop. Any other error shape (an atom reason, a missing field)
+  yields `nil`.
+  """
+  @spec session_id(Result.t() | Error.t() | term()) :: String.t() | nil
+  def session_id(%Result{session_id: sid}), do: sid
+  def session_id(%Error{reason: %{session_id: sid}}), do: sid
+  def session_id(_), do: nil
+
+  @doc """
+  Read the run's cost in USD from a run's payload, or `nil` if unavailable.
+
+  Like `session_id/1`, it hides the success-vs-rail-stop shape split:
+  `result.cost_usd` on a `%Result{}`, `error.reason.cost_usd` on a rail-stop
+  `%Error{}`. Use it in `c:ObanClaude.Worker.handle_error/3` to record spend
+  before enqueuing a resume job.
+  """
+  @spec cost_usd(Result.t() | Error.t() | term()) :: float() | nil
+  def cost_usd(%Result{cost_usd: cost}), do: cost
+  def cost_usd(%Error{reason: %{cost_usd: cost}}), do: cost
+  def cost_usd(_), do: nil
 
   # ---------------------------------------------------------------------------
   # private

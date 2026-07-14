@@ -60,16 +60,17 @@ defmodule ObanClaude.Worker do
       override to stub claude in tests.
 
   It injects a `perform/1` that merges the args (`pinned_args > job > args`), runs
-  `ObanClaude.run/2`, calls `c:handle_result/2` on success, and passes a
-  claude-level `{:error,...}` / `{:cancel,...}` / `{:snooze,...}` straight through
-  to Oban. A deterministic args fault (a missing prompt, an unknown
+  `ObanClaude.run/2`, calls `c:handle_result/2` on success, and routes every
+  non-`:ok` verdict (`{:error,...}` / `{:cancel,...}` / `{:snooze,...}`) through
+  `c:handle_error/3` with the run's payload (default: pass the verdict straight to
+  Oban). A deterministic args fault (a missing prompt, an unknown
   `permission_mode`) becomes `{:cancel, {:invalid_args, message}}` rather than a
   raise, so a malformed stored job dead-letters at once instead of retrying to
-  exhaustion (the message omits the arg values). Both `perform/1` and
-  `handle_result/2` are overridable.
+  exhaustion (the message omits the arg values). `perform/1`, `handle_result/2`,
+  and `handle_error/3` are all overridable.
   """
 
-  alias ClaudeWrapper.Result
+  alias ClaudeWrapper.{Error, Result}
 
   @doc """
   Called with the successful `%ClaudeWrapper.Result{}` and the `Oban.Job`.
@@ -79,6 +80,32 @@ defmodule ObanClaude.Worker do
   or enqueue a follow-on effector job (the "dispose" half of propose/dispose).
   """
   @callback handle_result(Result.t(), Oban.Job.t()) :: ObanClaude.oban_return()
+
+  @doc """
+  Called on every **non-`:ok`** verdict, with the classifier's Oban return, the
+  run's payload, and the `Oban.Job`. The error-path mirror of `handle_result/2`.
+
+  The default returns `oban_return` unchanged -- so a worker that does not
+  override it behaves exactly as before (the verdict passes straight to Oban).
+  Override it to react to the failure with the payload in hand, which `run/2`'s
+  return would otherwise drop:
+
+    * read `ObanClaude.session_id/1` / `ObanClaude.cost_usd/1` off a rail-stop
+      `%Error{}` to persist spend and enqueue a `resume:` continuation (see the
+      "session-resume handoff" pattern in the Agent worker patterns guide);
+    * make the verdict job-aware -- e.g. bound a snooze on a `job.meta` counter,
+      or dead-letter on the final `job.attempt`.
+
+  Return any `t:ObanClaude.oban_return/0`. Returning `oban_return` unchanged
+  keeps the classifier's decision; returning a different verdict overrides it.
+  Unlike `handle_result/2`, this fires for `{:error, _}`, `{:cancel, _}`, and
+  `{:snooze, _}` -- the verdict is the first argument so a clause can match on it.
+  """
+  @callback handle_error(
+              ObanClaude.oban_return(),
+              Error.t() | Result.t() | term(),
+              Oban.Job.t()
+            ) :: ObanClaude.oban_return()
 
   defmacro __using__(opts) do
     {oc_opts, oban_opts} = Keyword.split(opts, [:classifier, :query_fun, :args, :pinned_args])
@@ -108,14 +135,17 @@ defmodule ObanClaude.Worker do
 
         case ObanClaude.Worker.__run__(merged, @oban_claude_opts, job) do
           {:ok, %ClaudeWrapper.Result{} = result} -> handle_result(result, job)
-          {oban_return, _payload} -> oban_return
+          {oban_return, payload} -> handle_error(oban_return, payload, job)
         end
       end
 
       @impl ObanClaude.Worker
       def handle_result(_result, _job), do: :ok
 
-      defoverridable handle_result: 2, perform: 1
+      @impl ObanClaude.Worker
+      def handle_error(oban_return, _payload, _job), do: oban_return
+
+      defoverridable handle_result: 2, handle_error: 3, perform: 1
     end
   end
 
