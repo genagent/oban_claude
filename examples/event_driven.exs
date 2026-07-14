@@ -44,6 +44,9 @@ end
 defmodule EventWorker do
   use ObanClaude.Worker,
     queue: :events,
+    # Explicit: Oban's default is 20, and every retry is a fresh paid run. A
+    # mutating worker should use max_attempts: 1 (see the fleet-safety guide).
+    max_attempts: 3,
     unique: [period: 60],
     query_fun: &__MODULE__.fake_query/2
 
