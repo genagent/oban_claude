@@ -238,7 +238,7 @@ defmodule ObanClaudeTest do
         query_fun: fn _p, _o -> {:ok, %Result{result: "", is_error: false}} end
       )
 
-      assert_received {:telemetry, _name, %{cost_usd: 0.0}, _metadata}
+      assert_received {:telemetry, _name, %{cost_usd: +0.0}, _metadata}
     end
 
     test "emits :exception with duration and error/args on a wrapper error", %{attach: attach} do
@@ -252,6 +252,66 @@ defmodule ObanClaudeTest do
       assert is_integer(measurements.duration)
       assert metadata.error == err
       assert metadata.args == args
+    end
+
+    test "off-contract error terms still emit :exception (not silently dropped)", %{
+      attach: attach
+    } do
+      attach.([:oban_claude, :run, :exception], "oc-exception-offcontract")
+
+      ObanClaude.run(%{"prompt" => "x"}, query_fun: fn _p, _o -> {:error, :weird} end)
+
+      assert_received {:telemetry, [:oban_claude, :run, :exception], measurements, metadata}
+      assert metadata.error == :weird
+      assert measurements.cost_usd == 0.0
+    end
+
+    test ":exception carries the rail-stop cost_usd from the error reason", %{attach: attach} do
+      attach.([:oban_claude, :run, :exception], "oc-exception-cost")
+      err = %Error{kind: :max_budget_exceeded, reason: %{cost_usd: 1.5, cap: 1.0}}
+
+      ObanClaude.run(%{"prompt" => "x"}, query_fun: fn _p, _o -> {:error, err} end)
+
+      assert_received {:telemetry, [:oban_claude, :run, :exception], %{cost_usd: 1.5}, _metadata}
+    end
+
+    test "both events carry slim job identity when :job is passed", %{attach: attach} do
+      attach.([:oban_claude, :run, :stop], "oc-stop-job")
+
+      job = %Oban.Job{
+        id: 7,
+        queue: "claude",
+        worker: "MyApp.W",
+        attempt: 2,
+        max_attempts: 3,
+        meta: %{"k" => "v"}
+      }
+
+      ObanClaude.run(%{"prompt" => "x"},
+        query_fun: fn _p, _o -> {:ok, %Result{result: "", is_error: false}} end,
+        job: job
+      )
+
+      assert_received {:telemetry, [:oban_claude, :run, :stop], _m, %{job: jm}}
+
+      assert jm == %{
+               id: 7,
+               queue: "claude",
+               worker: "MyApp.W",
+               attempt: 2,
+               max_attempts: 3,
+               meta: %{"k" => "v"}
+             }
+    end
+
+    test "job metadata is nil for bare run/2 callers", %{attach: attach} do
+      attach.([:oban_claude, :run, :stop], "oc-stop-nojob")
+
+      ObanClaude.run(%{"prompt" => "x"},
+        query_fun: fn _p, _o -> {:ok, %Result{result: "", is_error: false}} end
+      )
+
+      assert_received {:telemetry, [:oban_claude, :run, :stop], _m, %{job: nil}}
     end
   end
 

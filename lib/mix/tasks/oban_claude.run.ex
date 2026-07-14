@@ -32,13 +32,22 @@ defmodule Mix.Tasks.ObanClaude.Run do
     * `--max-budget-usd` -- float
     * `--worktree` -- `true`/`false` for an ephemeral worktree, or a name for a
       named one (e.g. `--worktree issue-42`). Needs `--working-dir` to be a git repo.
+    * `--hermetic` -- `full` or `project` (or `true`, an alias for `full`): seal
+      the ambient `~/.claude` config for a reproducible run
     * `--json-schema` -- path/string for a structured-output run
     * `--add-dir`, `--allowed-tools`, `--disallowed-tools`, `--mcp-config` --
       repeatable (pass the flag once per value)
 
-  Output flag:
+  Short aliases: `-m` (`--model`), `-w` (`--working-dir`), `-p` (`--permission-mode`).
+  There is no `--meta` flag -- job metadata is an Oban-queue concern, not a
+  one-shot CLI one.
 
-    * `--json` -- print a machine-readable JSON summary instead of text
+  Output and exit status:
+
+    * `--json` -- print a machine-readable JSON summary (a structured `verdict`
+      plus result/error fields) instead of text.
+    * The task exits non-zero when the run's verdict is `{:error, _}` or
+      `{:cancel, _}`, so `mix oban_claude.run ... || handle_failure` works.
   """
 
   use Mix.Task
@@ -60,6 +69,7 @@ defmodule Mix.Tasks.ObanClaude.Run do
     timeout: :integer,
     max_budget_usd: :float,
     worktree: :string,
+    hermetic: :string,
     add_dir: [:string, :keep],
     allowed_tools: [:string, :keep],
     disallowed_tools: [:string, :keep],
@@ -70,13 +80,15 @@ defmodule Mix.Tasks.ObanClaude.Run do
   @aliases [m: :model, w: :working_dir, p: :permission_mode]
 
   @list_keys [:add_dir, :allowed_tools, :disallowed_tools, :mcp_config]
-  @atom_keys [:permission_mode, :effort]
+  @atom_keys [:permission_mode, :effort, :hermetic]
 
   @impl Mix.Task
   def run(argv) do
     {:ok, _} = Application.ensure_all_started(:claude_wrapper)
     {json?, args} = build(argv)
-    args |> ObanClaude.run() |> print(json?)
+    outcome = ObanClaude.run(args)
+    outcome |> render(json?) |> emit(outcome, json?)
+    unless success?(outcome), do: exit({:shutdown, 1})
   end
 
   @doc """
@@ -113,14 +125,39 @@ defmodule Mix.Tasks.ObanClaude.Run do
       |> coerce_atoms()
       |> coerce_worktree()
 
-    {json?, ObanClaude.Args.new(args_kw)}
+    {json?, build_validated(args_kw)}
   end
 
-  # The prompt is `--prompt` or the first positional argument.
+  # `Args.new/1` raises a `NimbleOptions.ValidationError` whose useful line is
+  # buried in an exception dump; surface just the message as a clean Mix error.
+  defp build_validated(args_kw) do
+    ObanClaude.Args.new(args_kw)
+  rescue
+    e in NimbleOptions.ValidationError -> Mix.raise(Exception.message(e))
+  end
+
+  # The prompt is `--prompt` or the single positional argument. Reject the
+  # ambiguous cases loudly rather than fire a paid run on the wrong prompt: extra
+  # positionals usually mean a forgotten shell quote.
   defp put_prompt(opts, positional) do
-    case {opts[:prompt], positional} do
-      {nil, [prompt | _]} -> Keyword.put(opts, :prompt, prompt)
-      _ -> opts
+    case {Keyword.has_key?(opts, :prompt), positional} do
+      {true, []} ->
+        opts
+
+      {true, _} ->
+        Mix.raise("--prompt given together with positional argument(s); pass the prompt once")
+
+      {false, [prompt]} ->
+        Keyword.put(opts, :prompt, prompt)
+
+      {false, []} ->
+        opts
+
+      {false, _many} ->
+        Mix.raise(
+          "multiple positional arguments; did you forget to quote the prompt? " <>
+            ~s(e.g. mix oban_claude.run "summarize the recent changes")
+        )
     end
   end
 
@@ -137,12 +174,22 @@ defmodule Mix.Tasks.ObanClaude.Run do
     scalars ++ grouped
   end
 
-  # permission_mode / effort are enums the builder expects as atoms.
+  # permission_mode / effort / hermetic are enums the builder expects as atoms.
+  # Use `to_existing_atom` (the valid values are compile-time atoms) so arbitrary
+  # CLI input cannot grow the atom table; an unknown value gets a clean error
+  # rather than a raw ArgumentError. `Args.new/1` still validates the vocabulary.
   defp coerce_atoms(opts) do
     Enum.map(opts, fn
-      {key, value} when key in @atom_keys and is_binary(value) -> {key, String.to_atom(value)}
+      {key, value} when key in @atom_keys and is_binary(value) -> {key, to_enum_atom!(key, value)}
       pair -> pair
     end)
+  end
+
+  defp to_enum_atom!(key, value) do
+    String.to_existing_atom(value)
+  rescue
+    ArgumentError ->
+      Mix.raise("invalid --#{String.replace(to_string(key), "_", "-")} value #{inspect(value)}")
   end
 
   # `--worktree` is boolean-or-string: "true"/"false" become the booleans (an
@@ -166,32 +213,42 @@ defmodule Mix.Tasks.ObanClaude.Run do
   # output
   # ---------------------------------------------------------------------------
 
-  defp print({oban_return, %ClaudeWrapper.Result{} = result}, true) do
-    %{
-      verdict: inspect(oban_return),
+  # Write the rendered output, then run/1 sets the exit status. JSON always goes
+  # to stdout (scripts pipe it); a text-mode failure goes to stderr.
+  defp emit(text, outcome, json?) do
+    if json? or success?(outcome), do: Mix.shell().info(text), else: Mix.shell().error(text)
+  end
+
+  defp success?({:ok, _payload}), do: true
+  defp success?({{:ok, _}, _payload}), do: true
+  defp success?(_), do: false
+
+  @doc false
+  # Render a run outcome to a printable string. A `@doc false` seam so the output
+  # layer (JSON + text, every payload shape) is testable without a paid run.
+  @spec render({ObanClaude.oban_return(), term()}, boolean()) :: String.t()
+  def render({oban_return, %ClaudeWrapper.Result{} = result}, true) do
+    oban_return
+    |> verdict_json()
+    |> Map.merge(%{
       result: result.result,
       cost_usd: result.cost_usd,
       session_id: result.session_id,
       duration_ms: result.duration_ms,
       num_turns: result.num_turns,
       structured: ObanClaude.structured(result)
-    }
+    })
     |> encode_json()
-    |> Mix.shell().info()
   end
 
-  defp print({oban_return, %ClaudeWrapper.Error{} = error}, true) do
-    %{verdict: inspect(oban_return), error_kind: error.kind, reason: inspect(error.reason)}
+  def render({oban_return, %ClaudeWrapper.Error{} = error}, true) do
+    oban_return
+    |> verdict_json()
+    |> Map.merge(%{error_kind: error.kind, error_reason: reason_string(error.reason)})
     |> encode_json()
-    |> Mix.shell().info()
   end
 
-  defp print({oban_return, %ClaudeWrapper.Result{} = result}, false) do
-    shell = Mix.shell()
-    shell.info("verdict: #{inspect(oban_return)}")
-    shell.info("")
-    shell.info(result.result || "")
-
+  def render({oban_return, %ClaudeWrapper.Result{} = result}, false) do
     meta =
       [
         cost: result.cost_usd && "$#{result.cost_usd}",
@@ -202,19 +259,35 @@ defmodule Mix.Tasks.ObanClaude.Run do
       |> Enum.reject(fn {_, v} -> is_nil(v) end)
       |> Enum.map_join("  ", fn {k, v} -> "#{k}=#{v}" end)
 
-    if meta != "", do: shell.info("\n" <> meta)
+    structured =
+      case ObanClaude.structured(result) do
+        nil -> ""
+        s -> "\n\nstructured:\n" <> encode_json(s)
+      end
 
-    case ObanClaude.structured(result) do
-      nil -> :ok
-      structured -> shell.info("\nstructured:\n" <> encode_json(structured))
-    end
+    "verdict: #{inspect(oban_return)}\n\n#{result.result}" <>
+      if(meta != "", do: "\n\n" <> meta, else: "") <> structured
   end
 
-  defp print({oban_return, %ClaudeWrapper.Error{} = error}, false) do
-    shell = Mix.shell()
-    shell.info("verdict: #{inspect(oban_return)}")
-    shell.error("error [#{error.kind}]: #{inspect(error.reason)}")
+  def render({oban_return, %ClaudeWrapper.Error{} = error}, false) do
+    "verdict: #{inspect(oban_return)}\nerror [#{error.kind}]: #{reason_string(error.reason)}"
   end
+
+  # Defensive: a payload that is neither Result nor Error (reachable only via a
+  # classifier contract violation) still renders instead of raising.
+  def render({oban_return, payload}, _json?) do
+    "verdict: #{inspect(oban_return)}\n#{inspect(payload)}"
+  end
+
+  # A structured verdict for --json consumers, instead of an Elixir tuple string.
+  defp verdict_json(:ok), do: %{verdict: "ok"}
+  defp verdict_json({:ok, _}), do: %{verdict: "ok"}
+  defp verdict_json({:error, reason}), do: %{verdict: "error", reason: reason_string(reason)}
+  defp verdict_json({:cancel, reason}), do: %{verdict: "cancel", reason: reason_string(reason)}
+  defp verdict_json({:snooze, n}), do: %{verdict: "snooze", snooze: n}
+
+  defp reason_string(reason) when is_atom(reason), do: to_string(reason)
+  defp reason_string(reason), do: inspect(reason)
 
   # OTP's built-in JSON encoder (OTP 27+); no dependency needed. Normalize first
   # because the encoder maps only the atom `:null` to JSON `null` -- an Elixir
