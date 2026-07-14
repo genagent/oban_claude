@@ -40,6 +40,9 @@ jobs:
             ${{ runner.os }}-plt-otp29-elixir1.20-
 
       - run: mix deps.get
+      # Fail if a locked dep has been retired on Hex (security/yanked), so it
+      # can't be silently reinstalled or republished against.
+      - run: mix hex.audit
       - run: mix compile --warnings-as-errors
       - run: mix format --check-formatted
       - run: mix credo --strict
@@ -48,3 +51,6 @@ jobs:
       # makes no API calls and needs no claude binary.
       - run: mix test
       - run: mix dialyzer
+      # Packaging smoke test: build the Hex tarball (exercises the package/0
+      # files: list) so tarball contents are validated in CI, not first at publish.
+      - run: mix hex.build

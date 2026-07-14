@@ -4,10 +4,19 @@ This walks you from an empty directory to a running claude worker on an Oban
 queue -- end to end, on SQLite, no Postgres or Docker. By the end you enqueue a
 job and watch it run.
 
-There is a faster path: the [Igniter installer](readme.html#installation)
+There is a faster path: the [Igniter installer](readme.html#install)
 scaffolds all of this in one command. This guide does it by hand so you
-understand each piece; skip to [step 7](#module-7-your-first-worker) if the
+understand each piece; skip to [step 7](#7-your-first-worker) if the
 installer already set up the project.
+
+## Requirements
+
+- **Elixir `~> 1.20`** on **OTP 29** -- what this library is built and tested on.
+- The **`claude` CLI, installed and authenticated** -- it is what actually runs
+  (via `claude_wrapper`). Steps 1-8 are fully offline (claude is stubbed), but
+  step 9 makes a real call, so install the CLI and sign in first and run
+  `claude doctor` to confirm. Without it, your first real job dead-letters as
+  `{:cancel, :binary_not_found}` or `{:cancel, :auth}`.
 
 ## 1. A new project
 
@@ -27,7 +36,7 @@ Add three deps in `mix.exs` -- `oban_claude`, `oban`, and the SQLite adapter:
 defp deps do
   [
     {:oban_claude, "~> 0.1"},
-    {:oban, "~> 2.19"},
+    {:oban, "~> 2.23"},
     {:ecto_sqlite3, "~> 0.17"}
   ]
 end
@@ -36,6 +45,9 @@ end
 ```bash
 mix deps.get
 ```
+
+If an existing project's lockfile pins an older Oban, run `mix deps.update oban`
+(oban_claude requires `~> 2.23`).
 
 ## 3. An Ecto repo
 

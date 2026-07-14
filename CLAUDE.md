@@ -27,7 +27,10 @@ plugin and a sink) and the app that wires them together live elsewhere.
 
 ## Conventions
 
-- Elixir `~> 1.20`, OTP 29. `claude_wrapper` is a Hex dependency.
+- Elixir `~> 1.20`, OTP 29. `claude_wrapper` is a Hex dependency, pinned to the
+  `~> 0.13.0` line: this library hardcodes its contract (`@passthrough` keys, the
+  permission_mode/effort/hermetic vocabularies, the `Outcome` error kinds), so
+  bump it deliberately per wrapper release and re-verify those lists.
 - Run `mix format`, `mix compile --warnings-as-errors`, `mix credo --strict`, `mix docs --warnings-as-errors`, `mix test`, and `mix dialyzer` before every push; CI runs the same.
 - The `:live`-tagged test makes a real, paid claude call and is excluded by default. Run it with `mix test --only live`.
 - `examples/playground.exs` and `examples/propose_dispose.exs` run the worker offline on a throwaway SQLite-backed Oban: `mix run examples/<script>.exs`.

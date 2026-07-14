@@ -136,7 +136,9 @@ defmodule MyApp.AuditWorker do
   def handle_result(result, _job) do
     case ObanClaude.structured(result) do
       %{"overall" => verdict, "findings" => findings} ->
-        report(verdict, findings)
+        # stand-in for however your app reports findings (a Logger call, a DB
+        # write, a notification) -- the point is the verdict -> Oban mapping below
+        IO.inspect(findings, label: "audit #{verdict}")
         if verdict == "blockers", do: {:cancel, :blockers}, else: :ok
 
       _ ->
@@ -239,7 +241,12 @@ structured "not ready yet" verdict and let `handle_result/2` snooze.
   prune (`git worktree remove`). `oban_claude` does not own git lifecycle;
   cleanup is the app's (or a maintenance job's).
 - **Issue -> prompt is the app's job.** `oban_claude` is trigger-agnostic; how a
-  webhook/poller/issue becomes a prompt lives in a source layer, not here.
+  webhook/poller/issue becomes a prompt lives in a source layer, not here. For
+  composing the prompt itself, `ClaudeWrapper.Prompt` (one layer down) is a
+  builder -- `new`/`append`/`attach`/`git_diff`/`git_log`/`vars`, and `render/1`
+  returns the plain string `ObanClaude.Args` accepts. Note `render/1` does its
+  file/git IO when called: render at enqueue to capture git state then, or
+  render inside the job (a custom `:query_fun`) for run-time state.
 - **Concurrency.** Independent jobs run concurrently, each in its own named
   worktree. Serialize (queue concurrency 1) only where later jobs depend on
   earlier ones landing (e.g. sequential merges into one branch).

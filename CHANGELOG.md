@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.1.0](https://github.com/genagent/oban_claude/compare/v0.1.0...v0.1.0) (2026-07-01)
+## [0.1.0](https://github.com/genagent/oban_claude/releases/tag/v0.1.0) (2026-07-01)
 
 
 ### Features
@@ -25,5 +25,3 @@
 ### Miscellaneous Chores
 
 * release initial version as 0.1.0 ([#36](https://github.com/genagent/oban_claude/issues/36)) ([1579e4d](https://github.com/genagent/oban_claude/commit/1579e4d4c3436c5b0936307b725a14f4ef03f34c))
-
-## Changelog
