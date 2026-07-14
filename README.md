@@ -313,19 +313,29 @@ atom, which it records as success.
 
 ## Examples
 
-Runnable, offline scripts (throwaway SQLite-backed Oban, claude stubbed via
-`:query_fun`), each `mix run examples/<name>.exs` (they ship in the Hex package,
-or browse them on [GitHub](https://github.com/genagent/oban_claude/tree/main/examples)):
+Runnable scripts (throwaway SQLite-backed Oban; claude is stubbed via
+`:query_fun`, so they cost nothing), each `mix run examples/<name>.exs` (they
+ship in the Hex package, or browse them on
+[GitHub](https://github.com/genagent/oban_claude/tree/main/examples)). CI runs
+the fast offline ones on every push, so a drift in the public API breaks the
+build, not your first `mix run`:
 
 - `playground.exs` -- one job per claude outcome, watch the queue resolve them
   (`:ok` / cancel / retry / snooze).
 - `propose_dispose.exs` -- a structured-output run whose result drives a
   follow-on effector job.
-- `scheduled_routine.exs` -- a Cron-driven routine: the worker holds the prompt,
-  the job is empty, and `Oban.Plugins.Cron` fires it on a schedule.
 - `event_driven.exs` -- insert-driven triggering: a burst of identical events is
   debounced to one run by Oban's `unique`, a distinct event gets its own.
-- `triage_issues.exs` -- a worker configured for issue triage.
+- `triage_issues.exs` -- a worker configured for issue triage; offline by
+  default (baked issues if `gh` is absent), `--live` for real paid haiku calls.
+
+Two more aren't run in CI -- one is slow, one is interactive:
+
+- `scheduled_routine.exs` -- a Cron-driven routine: the worker holds the prompt,
+  the job is empty, and `Oban.Plugins.Cron` fires it on a schedule (waits ~70s
+  for a real Cron tick).
+- `console.exs` -- a local queue you drive from `iex -S mix` (loaded by
+  `.iex.exs`); each `run/1` is a real, paid claude call.
 
 To scaffold a fresh project with all the pieces wired (SQLite, Oban, a sample
 worker, a boot-time watch demo), use the [Igniter](https://hexdocs.pm/igniter)

@@ -121,9 +121,7 @@ end
 terminal = ~w(completed cancelled discarded)
 
 snapshot = fn ->
-  PdRepo.all(
-    from(j in "oban_jobs", select: {j.id, j.worker, j.state, j.queue}, order_by: j.id)
-  )
+  PdRepo.all(from(j in "oban_jobs", select: {j.id, j.worker, j.state, j.queue}, order_by: j.id))
 end
 
 IO.puts("Watching both queues:\n")

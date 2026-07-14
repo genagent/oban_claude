@@ -33,6 +33,21 @@ defmodule ObanClaude.Console do
   defmodule Worker do
     use ObanClaude.Worker, queue: :console, max_attempts: 1, args: %{"model" => "haiku"}
 
+    # handle_result/2 runs only on a successful claude call. Wrap perform/1
+    # (overridable) so a failed/cancelled run prints its Oban verdict instead of
+    # the job going silent -- same pattern as examples/triage_issues.exs.
+    @impl Oban.Worker
+    def perform(%Oban.Job{id: id} = job) do
+      case super(job) do
+        :ok ->
+          :ok
+
+        other ->
+          IO.puts("\n[job #{id}] no result (claude call failed): #{inspect(other)}")
+          other
+      end
+    end
+
     @impl ObanClaude.Worker
     def handle_result(result, %Oban.Job{id: id, args: args}) do
       IO.puts("\n[job #{id}] #{inspect(args["prompt"])}")

@@ -46,20 +46,27 @@ baked = [
   }
 ]
 
+# `gh` absent on this host (e.g. CI): System.cmd/3 would raise :enoent, not
+# return, so guard with find_executable/1 first -- then a live host without gh
+# falls back to the baked list instead of crashing, as the header promises.
 issues =
-  case System.cmd(
-         "gh",
-         ~w(issue list --repo #{repo} --state open --json number,title,body --limit 6),
-         stderr_to_stdout: true
-       ) do
-    {out, 0} ->
-      case Jason.decode(out) do
-        {:ok, [_ | _] = list} -> list
-        _ -> baked
-      end
+  if System.find_executable("gh") do
+    case System.cmd(
+           "gh",
+           ~w(issue list --repo #{repo} --state open --json number,title,body --limit 6),
+           stderr_to_stdout: true
+         ) do
+      {out, 0} ->
+        case Jason.decode(out) do
+          {:ok, [_ | _] = list} -> list
+          _ -> baked
+        end
 
-    _ ->
-      baked
+      _ ->
+        baked
+    end
+  else
+    baked
   end
 
 source = if issues == baked, do: "baked sample issues (gh unavailable)", else: "#{repo} (live gh)"
