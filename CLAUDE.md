@@ -9,10 +9,10 @@ Lifeline, Pruner); claude_wrapper owns running claude.
 ## Surface
 
 - `ObanClaude.run/2` -- the engine: a string-keyed args map in, `{oban_return, result}` out. Options: `:classifier` and `:query_fun`.
-- `ObanClaude.Worker` -- `use ObanClaude.Worker, <oban opts>`; `:args` are default claude args merged under each job's args (the job wins), and `handle_result/2` is the override point.
-- `ObanClaude.Args.new/1` / `defaults/1` -- the validated builder (atom keys in, the string map out); `defaults/1` is prompt-optional for worker `:args`, and a `:meta` map rides through untouched. `worktree` is a normal option.
+- `ObanClaude.Worker` -- `use ObanClaude.Worker, <oban opts>`; `:args` are default claude args merged under each job's args (the job wins). `handle_result/2` (success) and `handle_error/3` (every non-`:ok` verdict, with the run payload + job -- the home for a resume enqueue) are the override points.
+- `ObanClaude.Args.new/1` / `defaults/1` -- the validated builder (atom keys in, the string map out); `defaults/1` is prompt-optional for worker `:args`, and a `:meta` map rides through untouched. `worktree` and the session keys (`resume`, `session_id`, `fork_session`, `no_session_persistence`) are normal options.
 - `ObanClaude.Outcome.classify/1` -- the default, overridable outcome -> Oban-return mapping.
-- `ObanClaude.outcome/1` and `structured/1` -- read structured output from a `--json-schema` run.
+- `ObanClaude.outcome/1` and `structured/1` -- read structured output from a `--json-schema` run. `ObanClaude.session_id/1` / `cost_usd/1` -- read the resume handle / spend off a `%Result{}` or a rail-stop `%Error{}`.
 - `mix oban_claude.run` -- fire one claude run from the CLI. `mix oban_claude.install` -- Igniter installer that scaffolds a SQLite-backed setup (needs Igniter present first).
 
 ## Scope

@@ -185,6 +185,44 @@ defmodule ObanClaude.ArgsTest do
     end
   end
 
+  describe "session continuity (#73)" do
+    test "resume/session_id accept strings; the two flags accept booleans" do
+      args =
+        Args.new(
+          prompt: "x",
+          resume: "sess-1",
+          session_id: "sess-2",
+          no_session_persistence: true,
+          fork_session: true
+        )
+
+      assert args["resume"] == "sess-1"
+      assert args["session_id"] == "sess-2"
+      assert args["no_session_persistence"] == true
+      assert args["fork_session"] == true
+    end
+
+    test "reject wrong types" do
+      assert_raise NimbleOptions.ValidationError, ~r/invalid value for :resume/, fn ->
+        Args.new(prompt: "x", resume: 123)
+      end
+
+      assert_raise NimbleOptions.ValidationError,
+                   ~r/invalid value for :no_session_persistence/,
+                   fn -> Args.new(prompt: "x", no_session_persistence: "yes") end
+    end
+
+    test "continue_session is deliberately NOT accepted (host-scoped, unsafe under concurrency)" do
+      assert_raise NimbleOptions.ValidationError, ~r/unknown options \[:continue_session\]/, fn ->
+        Args.new(prompt: "x", continue_session: true)
+      end
+    end
+
+    test "available in defaults/1 for a per-worker fire-and-forget seal" do
+      assert Args.defaults(no_session_persistence: true) == %{"no_session_persistence" => true}
+    end
+  end
+
   describe "add_dir" do
     test "accepts a list of paths" do
       assert Args.new(prompt: "x", add_dir: ["/a", "/b"])["add_dir"] == ["/a", "/b"]
@@ -221,7 +259,11 @@ defmodule ObanClaude.ArgsTest do
         timeout: 60_000,
         json_schema: ~s({"type":"object"}),
         worktree: "issue-5",
-        hermetic: :full
+        hermetic: :full,
+        resume: "sess-1",
+        session_id: "sess-2",
+        no_session_persistence: true,
+        fork_session: true
       ]
 
       assert Enum.sort(Keyword.keys(opts)) == Enum.sort(Args.keys() -- [:meta])

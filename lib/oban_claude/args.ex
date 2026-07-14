@@ -70,6 +70,37 @@ defmodule ObanClaude.Args do
           "keeps the user's global `~/.claude`. Recommended in `defaults/1` for " <>
           "reproducible server runs that should not depend on the host's config."
     ],
+    resume: [
+      type: :string,
+      doc:
+        "Resume a prior claude session by id (`--resume`). The id comes from a " <>
+          "previous run -- `ObanClaude.session_id/1` reads it off a `%Result{}` or " <>
+          "a rail-stop `%Error{}`. The canonical use is the resume-after-rail-stop " <>
+          "recipe: a follow-on job with `resume:` + the same *named* `worktree` " <>
+          "continues a stopped run cheaply. Session state is node-local (see the " <>
+          "\"session-resume handoff\" pattern in the Agent worker patterns guide)."
+    ],
+    session_id: [
+      type: :string,
+      doc:
+        "Pin the session id for this run (`--session-id`), so a known id can be " <>
+          "resumed later. Distinct from `resume`, which *continues* an existing id."
+    ],
+    no_session_persistence: [
+      type: :boolean,
+      doc:
+        "Do not persist this run's session transcript under `~/.claude` " <>
+          "(`--no-session-persistence`). Recommended for fire-and-forget batch " <>
+          "workers: it stops unattended runs accumulating transcripts (disk growth " <>
+          "and plaintext data at rest). Mutually exclusive with the resume recipe -- " <>
+          "it deletes the transcript `resume` would need."
+    ],
+    fork_session: [
+      type: :boolean,
+      doc:
+        "Fork a new session from the resumed one rather than continuing it in " <>
+          "place (`--fork-session`), so the original transcript is left untouched."
+    ],
     meta: [
       type: {:map, {:or, [:atom, :string]}, :any},
       doc:

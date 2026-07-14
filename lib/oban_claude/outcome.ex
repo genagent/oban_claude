@@ -59,10 +59,12 @@ defmodule ObanClaude.Outcome do
   The rail-stop rows -- `:budget_exceeded` (a client-side ceiling),
   `:max_budget_exceeded` (claude's own `--max-budget-usd` cap), and
   `:max_turns_exceeded` -- are the genuinely app-dependent ones. An app that
-  resumes the run rather than restarting it may prefer `{:error, ...}` (or a
-  bounded snooze) there. That is what the `:classifier` override is for. Note the
-  args map does not yet forward `session_id`/`resume`, so resuming a pinned
-  session today requires a custom `:query_fun`.
+  resumes the run rather than restarting it reads the `session_id` off the
+  rail-stop `%Error{}` in `c:ObanClaude.Worker.handle_error/3` (via
+  `ObanClaude.session_id/1`) and enqueues a follow-on job with `resume:` + the
+  same named worktree -- the "session-resume handoff" pattern in the Agent worker
+  patterns guide. The classifier override is for a *verdict* change (e.g. a
+  bounded snooze); the resume *effect* belongs in `handle_error/3`.
 
   An `{:error, term}` that is not a typed `%Error{}` (off the documented
   contract, e.g. a custom `:query_fun` routing through
@@ -92,8 +94,9 @@ defmodule ObanClaude.Outcome do
   ]
 
   # The rails deliberately stopped a run that was otherwise progressing. A blind
-  # retry just re-burns the same budget or turn ceiling; resuming a pinned
-  # `--session-id` is a deliberate act for the app (override the classifier).
+  # retry just re-burns the same budget or turn ceiling; resuming is a deliberate
+  # act for the app (read session_id off the %Error{} in handle_error/3, enqueue
+  # a resume: job into the same named worktree).
   # `:budget_exceeded` is the client-side ceiling; `:max_budget_exceeded` is
   # claude's own `--max-budget-usd` cap. Both stop the same way -- retrying
   # re-burns the spend -- so both cancel.

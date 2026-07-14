@@ -62,9 +62,10 @@ end
 The job args are the spec: `prompt` (required) plus a **curated subset** of
 `claude_wrapper` query options (`model`, `max_turns`, `max_budget_usd`,
 `working_dir`, `permission_mode`, `timeout`, ...) -- the exact set is the
-`ObanClaude.Args` options table. Query options outside that set (e.g.
-`session_id`, `resume`) are not forwarded, and unknown raw-map keys are silently
-ignored. Args are JSON, so atom-valued options are given as strings:
+`ObanClaude.Args` options table (which now includes the session-control keys
+`resume` / `session_id` / `fork_session` / `no_session_persistence`). Query
+options outside that set (e.g. `env`) are not forwarded, and unknown raw-map keys
+are silently ignored. Args are JSON, so atom-valued options are given as strings:
 `permission_mode` is `"bypass_permissions"`, coerced to the atom for you.
 
 In `handle_result/2`, `ObanClaude.outcome/1` reads the `"outcome"` key of a
@@ -285,7 +286,7 @@ via `:classifier`):
 | `:command_failed` / `:json` / `:io` | `{:error, kind}` | likely transient; retry + backoff |
 | missing/unrunnable binary (`:io` + `:enoent`/`:eacces`) | `{:cancel, :binary_not_found}` | the CLI is absent or not executable; re-fails identically |
 | `:auth` (other reasons) and other config/env faults | `{:cancel, kind}` | the broken environment re-fails identically; retrying cannot help |
-| `:max_budget_exceeded` / `:max_turns_exceeded` | `{:cancel, ...}` | the rails stopped it; resume/re-scope is deliberate |
+| `:max_budget_exceeded` / `:max_turns_exceeded` | `{:cancel, ...}` | the rails stopped it; resume via `handle_error/3` + `resume:` is deliberate |
 
 The default mapping never returns `{:snooze, _}`: Oban implements snooze by
 *incrementing* `max_attempts`, so a deterministically-failing job would snooze
@@ -305,6 +306,16 @@ defmodule MyApp.Worker do
   def classify(outcome), do: ObanClaude.Outcome.classify(outcome)
 end
 ```
+
+The classifier changes the *verdict*; it is a pure mapping and stays job-blind.
+To act on a failure with the run's payload and the job in hand -- persist the
+spend, or read the `session_id` off a rail-stop `%Error{}` and enqueue a
+`resume:` continuation -- override `c:ObanClaude.Worker.handle_error/3`, the
+error-path mirror of `handle_result/2` (it fires on every non-`:ok` verdict and
+defaults to passing the verdict through). `ObanClaude.session_id/1` and
+`cost_usd/1` read those off either a `%Result{}` or an `%Error{}` without
+touching `claude_wrapper` internals. See the **session-resume handoff** recipe in
+the [Agent worker patterns](guides/agent_worker_patterns.md) guide.
 
 A classifier must return the `{oban_return, payload}` envelope -- e.g.
 `{{:cancel, :blocked}, error}`, not a flat `{:cancel, :blocked}`. `run/2` raises

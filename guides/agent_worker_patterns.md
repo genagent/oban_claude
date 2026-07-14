@@ -259,6 +259,91 @@ re-check; Oban holds the job between them.
 This is the pipeline pattern for **any** async gate, not just CI: return a
 structured "not ready yet" verdict and let `handle_result/2` snooze.
 
+## Session-resume handoff: rail stop -> cheap continuation
+
+A rail stop (`:max_budget_exceeded` / `:max_turns_exceeded`) is the classifier's
+`{:cancel, _}` by default -- the rails stopped a run that *was* making progress.
+Restarting from scratch pays the full cost again. Resuming the same claude
+session instead turns a ~$2 re-run into a ~$0.20 continuation.
+
+The handle lives in the failure payload, which `handle_result/2` never sees.
+`handle_error/3` -- the error-path mirror, called on every non-`:ok` verdict with
+`(verdict, payload, job)` -- is where you read it and enqueue the follow-on:
+
+```elixir
+defmodule MyApp.Agent do
+  use ObanClaude.Worker,
+    queue: :claude,
+    max_attempts: 3,
+    # A NAMED worktree: the resume re-enters the SAME tree. `worktree: true` is
+    # ephemeral and CANNOT be resumed into.
+    args: ObanClaude.Args.defaults(working_dir: ".", worktree: "issue-42", max_budget_usd: 2.0)
+
+  @rail_stops [:max_budget_exceeded, :max_turns_exceeded]
+
+  @impl ObanClaude.Worker
+  def handle_result(_result, _job), do: :ok
+
+  @impl ObanClaude.Worker
+  def handle_error({:cancel, kind} = verdict, %ClaudeWrapper.Error{} = error, job)
+      when kind in @rail_stops do
+    sid = ObanClaude.session_id(error)          # nil-safe: any reason field may be nil
+    depth = String.to_integer(job.meta["resume_depth"] || "0")
+
+    if is_binary(sid) and depth < 2 do          # guard nil sid + cap the chain
+      MyApp.Ledger.record(job.meta["issue"], ObanClaude.cost_usd(error))
+
+      ObanClaude.Args.new(prompt: "continue where you left off", resume: sid,
+                          worktree: job.args["worktree"])
+      # resume_depth rides in Oban job meta (bookkeeping), NOT the claude args;
+      # unique on the session id so a Lifeline re-execution collapses to one job.
+      |> __MODULE__.new(meta: %{"resume_depth" => to_string(depth + 1), "issue" => job.meta["issue"]},
+                        unique: [period: 60, keys: [:resume]])
+      |> Oban.insert()
+    end
+
+    verdict   # still cancel the spent job; the resume job carries on
+  end
+
+  # transient errors, snooze, non-rail cancels: unchanged
+  def handle_error(oban_return, _payload, _job), do: oban_return
+end
+```
+
+Enqueue the first job with the issue in meta and the named worktree:
+
+```elixir
+ObanClaude.Args.new(prompt: "fix issue 42", worktree: "issue-42")
+|> MyApp.Agent.new(meta: %{"issue" => "42"})
+|> Oban.insert()
+```
+
+Operational caveats -- resume is a filesystem-and-session-bound trick, so treat
+these as requirements, not footnotes:
+
+- **Node affinity.** The session transcript (under `~/.claude`) and the named
+  worktree are on the **local filesystem of the node that ran the original job**.
+  OSS Oban has no node affinity, so a resume job claimed by a *different* node
+  finds nothing and silently does a full-price fresh run. Resume is only reliable
+  on a **single-node** claude queue, a **node-pinned** queue, or with **shared
+  storage** for `~/.claude` + worktrees. `oban_claude` owns no state and does no
+  routing -- if you run multi-node, stamp the origin node into `meta` and gate the
+  resume on it (fall through to a fresh run otherwise).
+- **Named worktree required.** `worktree: true` is ephemeral and gone after the
+  run; only a *named* worktree (`worktree: "issue-N"`) can be re-entered.
+- **`no_session_persistence` forecloses resume.** It deletes the transcript
+  `--resume` needs; the two are mutually exclusive. It is the right call for
+  fire-and-forget batch workers (it stops transcripts -- and any customer data in
+  the prompt -- accumulating plaintext under `~/.claude`), but such a worker
+  cannot use this recipe. Persistence-on leaves those transcripts at rest with no
+  Oban Pruner over them: the app owns an external reaper.
+- **Cap the chain.** A continuation can rail-stop too; the `resume_depth` counter
+  bounds an otherwise unbounded resume loop.
+- **Never bound a snooze on `attempt < max_attempts`.** Snooze *increments*
+  `max_attempts`, so that guard never terminates. Bound any snooze on a fixed
+  integer or a `job.meta` counter -- which is exactly why the default `:timeout`
+  mapping stays `{:error, _}` and never snoozes.
+
 ## Notes and gotchas
 
 - **Worktree lifecycle.** A *named* worktree persists after the run -- that is

@@ -197,6 +197,62 @@ defmodule ObanClaudeTest do
         ObanClaude.run(%{}, query_fun: fn _p, _o -> {:ok, %Result{is_error: false}} end)
       end
     end
+
+    test "session keys reach the query opts (strings unchanged, flags as booleans)" do
+      pid = self()
+
+      qf = fn _p, opts ->
+        send(pid, {:opts, opts})
+        {:ok, %Result{result: "", is_error: false}}
+      end
+
+      ObanClaude.run(
+        %{
+          "prompt" => "x",
+          "resume" => "sess-1",
+          "session_id" => "sess-2",
+          "no_session_persistence" => true,
+          "fork_session" => true
+        },
+        query_fun: qf
+      )
+
+      assert_received {:opts, opts}
+      assert opts[:resume] == "sess-1"
+      assert opts[:session_id] == "sess-2"
+      assert opts[:no_session_persistence] == true
+      assert opts[:fork_session] == true
+    end
+  end
+
+  describe "session_id/1 and cost_usd/1" do
+    test "read from a %Result{} on success" do
+      r = %Result{result: "ok", is_error: false, session_id: "sess-1", cost_usd: 0.5}
+
+      assert ObanClaude.session_id(r) == "sess-1"
+      assert ObanClaude.cost_usd(r) == 0.5
+    end
+
+    test "read from a rail-stop %Error{} reason map" do
+      e = %Error{
+        kind: :max_budget_exceeded,
+        reason: %{cap: 2.0, cost_usd: 2.1, num_turns: 9, session_id: "sess-2"}
+      }
+
+      assert ObanClaude.session_id(e) == "sess-2"
+      assert ObanClaude.cost_usd(e) == 2.1
+    end
+
+    test "nil when the field is absent, the reason is a bare atom, or the payload is off-shape" do
+      assert ObanClaude.session_id(%Error{kind: :auth, reason: :rate_limit}) == nil
+      assert ObanClaude.cost_usd(%Error{kind: :auth, reason: :rate_limit}) == nil
+      # a rail-stop reason missing session_id (any field may be nil)
+      assert ObanClaude.session_id(%Error{kind: :max_turns_exceeded, reason: %{cost_usd: 1.0}}) ==
+               nil
+
+      assert ObanClaude.session_id(:weird) == nil
+      assert ObanClaude.cost_usd(nil) == nil
+    end
   end
 
   # A remote (named) handler -- avoids telemetry's local-function perf warning.
