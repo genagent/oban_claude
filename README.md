@@ -234,10 +234,36 @@ via `:classifier`):
 |---|---|---|
 | `Result` ok | `:ok` -> `handle_result/2` | success; the worker decides the final atom |
 | `Result is_error: true` | `{:error, :result_error}` | retry, capped by `max_attempts` |
-| `:timeout` | `{:snooze, 30}` | transient; back off |
+| `:timeout` | `{:error, :timeout}` | transient; retry with backoff, bounded by `max_attempts` |
+| `:auth` (`reason: :rate_limit`) | `{:error, :rate_limit}` | rate/quota limit is transient; retry (bounded) |
 | `:command_failed` / `:json` / `:io` | `{:error, kind}` | likely transient; retry + backoff |
-| `:auth`, `:binary_not_found`, and other config/env faults | `{:cancel, ...}` | the broken environment re-fails identically; retrying cannot help |
+| missing/unrunnable binary (`:io` + `:enoent`/`:eacces`) | `{:cancel, :binary_not_found}` | the CLI is absent or not executable; re-fails identically |
+| `:auth` (other reasons) and other config/env faults | `{:cancel, kind}` | the broken environment re-fails identically; retrying cannot help |
 | `:budget_exceeded` / `:max_turns_exceeded` | `{:cancel, ...}` | the rails stopped it; resume/re-scope is deliberate |
+
+The default mapping never returns `{:snooze, _}`: Oban implements snooze by
+*incrementing* `max_attempts`, so a deterministically-failing job would snooze
+forever (unbounded paid re-runs). Every transient outcome is `{:error, _}`
+instead, bounded by `max_attempts`. To opt into snooze -- or any other verdict
+-- override the classifier, returning the `{oban_return, payload}` envelope:
+
+```elixir
+defmodule MyApp.Worker do
+  use ObanClaude.Worker, queue: :claude, classifier: &__MODULE__.classify/1
+
+  # Ride out a rate-limit window with a snooze (accepting that snooze bypasses
+  # max_attempts); defer everything else to the default mapping.
+  def classify({:error, %ClaudeWrapper.Error{kind: :auth, reason: :rate_limit} = e}),
+    do: {{:snooze, {15, :minutes}}, e}
+
+  def classify(outcome), do: ObanClaude.Outcome.classify(outcome)
+end
+```
+
+A classifier must return the `{oban_return, payload}` envelope -- e.g.
+`{{:cancel, :blocked}, error}`, not a flat `{:cancel, :blocked}`. `run/2` raises
+on a flat verdict, since `ObanClaude.Worker` would otherwise hand Oban a bare
+atom, which it records as success.
 
 ## Examples
 

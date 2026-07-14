@@ -46,13 +46,24 @@ end
 # 3. The REAL worker, with claude stubbed via :query_fun.
 # ---------------------------------------------------------------------------
 defmodule PlaygroundWorker do
-  use ObanClaude.Worker, queue: :claude, max_attempts: 3, query_fun: &__MODULE__.fake_query/2
+  use ObanClaude.Worker,
+    queue: :claude,
+    max_attempts: 3,
+    query_fun: &__MODULE__.fake_query/2,
+    classifier: &__MODULE__.classify/1
 
   alias ClaudeWrapper.{Error, Result}
 
   # Tiny backoff so retries are watchable in seconds (Oban's default is ~15s+).
   @impl Oban.Worker
   def backoff(%Oban.Job{}), do: 1
+
+  # The default classifier now maps :timeout to {:error, :timeout} (snooze
+  # bypasses max_attempts, so it is no longer a default -- see ObanClaude.Outcome).
+  # This worker opts back into a snooze for :timeout purely to demonstrate the
+  # parked/scheduled state below; everything else defers to the default mapping.
+  def classify({:error, %Error{kind: :timeout} = e}), do: {{:snooze, 30}, e}
+  def classify(outcome), do: ObanClaude.Outcome.classify(outcome)
 
   # The worker's one override point: branch on a typed structured outcome.
   @impl ObanClaude.Worker
@@ -118,7 +129,7 @@ jobs = [
   {%{"prompt" => "ok", "model" => "sonnet", "permission_mode" => "bypass_permissions"},
    "clean result -> :ok", []},
   {%{"prompt" => "blocked"}, "structured 'blocked' -> handle_result cancels", []},
-  {%{"prompt" => "timeout"}, "transient -> snooze 30s", []},
+  {%{"prompt" => "timeout"}, "transient -> snooze 30s (classifier override)", []},
   {%{"prompt" => "auth"}, "config problem -> cancel (terminal)", []},
   {%{"prompt" => "command_failed"}, "infra blip -> retry then discard", [max_attempts: 2]}
 ]
@@ -184,5 +195,7 @@ IO.puts("""
   cancelled  {:cancel, _}: terminal, no retry  (auth, and blocked via handle_result)
   discarded  ran out of attempts after {:error, _} retries  (command_failed)
   scheduled  {:snooze, 30}: parked ~30s out; Oban bumped max_attempts so the
-             snooze did not cost a retry  (timeout)
+             snooze did not cost a retry  (timeout, via this worker's classifier
+             override -- the DEFAULT mapping returns {:error, :timeout}, since a
+             snooze would let a stuck run retry forever)
 """)

@@ -67,9 +67,32 @@ defmodule ObanClaude do
 
   alias ClaudeWrapper.{Error, Result}
 
-  @typedoc "An `c:Oban.Worker.perform/1` return value."
+  @typedoc """
+  An `c:Oban.Worker.perform/1` return value. `:snooze` accepts Oban's full
+  `t:Oban.Period.t/0` -- a `pos_integer` of seconds or a `{n, unit}` tuple. The
+  default classifier (`ObanClaude.Outcome`) never returns `:snooze` (it would
+  bypass `max_attempts`); a `:classifier` override may.
+  """
   @type oban_return ::
-          :ok | {:ok, term} | {:error, term} | {:cancel, term} | {:snooze, pos_integer}
+          :ok | {:ok, term} | {:error, term} | {:cancel, term} | {:snooze, Oban.Period.t()}
+
+  @typedoc """
+  What `ClaudeWrapper.query/2` (or a custom `:query_fun`) returns: a typed
+  `%Result{}`, or a typed `%Error{}` (an arbitrary `term()` only off the
+  documented contract).
+  """
+  @type wrapper_outcome :: {:ok, Result.t()} | {:error, Error.t() | term()}
+
+  @typedoc """
+  Maps a `t:wrapper_outcome/0` onto the `{oban_return, payload}` envelope. The
+  first element MUST be a valid `t:oban_return/0`; `run/2` raises otherwise. A
+  common mistake is a flat `{:cancel, reason}` -- that is a bare verdict, not
+  the `{verdict, payload}` envelope the `ObanClaude.Worker` path unwraps.
+  """
+  @type classifier :: (wrapper_outcome() -> {oban_return(), term()})
+
+  @typedoc "The claude entrypoint: `(prompt, query_opts) -> t:wrapper_outcome/0`."
+  @type query_fun :: (String.t(), keyword() -> wrapper_outcome())
 
   # Args-map keys passed straight through to `ClaudeWrapper.query/2`. Kept a
   # superset of `ObanClaude.Args`'s curated keys, or a key the constructor emits
@@ -113,14 +136,18 @@ defmodule ObanClaude do
 
   Options:
 
-    * `:classifier` -- a 1-arity fun mapping the claude call's result onto
-      `{oban_return, term}`. Defaults to `&ObanClaude.Outcome.classify/1`.
-    * `:query_fun` -- the claude entrypoint: a 2-arity fun
-      `(prompt, query_opts) -> {:ok, %Result{}} | {:error, %Error{}}`. Defaults
-      to `&ClaudeWrapper.query/2`. Override to stub claude in tests, or to route
+    * `:classifier` -- a `t:classifier/0`: a 1-arity fun mapping the claude
+      call's outcome onto the `{oban_return, payload}` envelope. The first
+      element is the Oban verdict; `run/2` raises `ArgumentError` if it is not a
+      valid `t:oban_return/0` (guarding the flat-`{:cancel, reason}` mistake
+      that Oban would otherwise silently treat as success). Defaults to
+      `&ObanClaude.Outcome.classify/1`.
+    * `:query_fun` -- a `t:query_fun/0`, the claude entrypoint. Defaults to
+      `&ClaudeWrapper.query/2`. Override to stub claude in tests, or to route
       through a different wrapper entrypoint.
   """
-  @spec run(map, keyword) :: {oban_return, Result.t() | Error.t() | term()}
+  @spec run(ObanClaude.Args.t(), [{:classifier, classifier()} | {:query_fun, query_fun()}]) ::
+          {oban_return(), Result.t() | Error.t() | term()}
   def run(args, opts \\ []) when is_map(args) do
     classifier = Keyword.get(opts, :classifier, &ObanClaude.Outcome.classify/1)
     query_fun = Keyword.get(opts, :query_fun, &ClaudeWrapper.query/2)
@@ -130,7 +157,7 @@ defmodule ObanClaude do
     outcome = query_fun.(prompt, query_opts)
     emit(outcome, start, args)
 
-    classifier.(outcome)
+    outcome |> classifier.() |> validate_classified!(classifier)
   end
 
   @doc """
@@ -196,6 +223,36 @@ defmodule ObanClaude do
                 "expected one of #{inspect(Map.keys(allowlist))}"
     end
   end
+
+  # A classifier must return the `{oban_return, payload}` envelope, its first
+  # element a valid `t:oban_return/0`. Without this guard a malformed verdict
+  # (classically a flat `{:cancel, reason}`, whose first element is the bare
+  # atom `:cancel`) flows through `ObanClaude.Worker.perform/1` as a bare atom;
+  # Oban's executor has no clause for it, logs a warning, and records the job as
+  # SUCCESS -- silently marking a failed, paid run complete. Raise instead.
+  defp validate_classified!(classified, classifier) do
+    if valid_return?(classified) do
+      classified
+    else
+      raise ArgumentError, """
+      classifier #{inspect(classifier)} returned #{inspect(classified)}, which \
+      is not the required {oban_return, payload} envelope.
+
+      The first element must be a valid Oban verdict -- :ok, {:ok, term}, \
+      {:error, term}, {:cancel, term}, or {:snooze, period}. A common mistake is \
+      returning a flat verdict such as {:cancel, reason}; wrap it with the \
+      payload instead: {{:cancel, reason}, error}.
+      """
+    end
+  end
+
+  defp valid_return?({:ok, _payload}), do: true
+  defp valid_return?({{:ok, _}, _payload}), do: true
+  defp valid_return?({{:error, _}, _payload}), do: true
+  defp valid_return?({{:cancel, _}, _payload}), do: true
+  defp valid_return?({{:snooze, n}, _payload}) when is_integer(n) and n > 0, do: true
+  defp valid_return?({{:snooze, {n, _unit}}, _payload}) when is_integer(n) and n > 0, do: true
+  defp valid_return?(_other), do: false
 
   defp emit({:ok, %Result{} = r}, start, args) do
     :telemetry.execute(

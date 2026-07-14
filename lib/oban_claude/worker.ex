@@ -39,10 +39,14 @@ defmodule ObanClaude.Worker do
       job wins). Defaults to `%{}`. Build it with `ObanClaude.Args.defaults/1`
       (prompt-optional; evaluates at compile time) or write the string map
       directly. It may reference module attributes defined before `use`.
-    * `:classifier` -- the outcome -> Oban-return mapping (see `ObanClaude.Outcome`),
-      forwarded to `ObanClaude.run/2`.
-    * `:query_fun` -- the claude entrypoint (defaults to `&ClaudeWrapper.query/2`),
-      forwarded to `ObanClaude.run/2`; override to stub claude in tests.
+    * `:classifier` -- a `t:ObanClaude.classifier/0`, the outcome -> Oban-return
+      mapping (see `ObanClaude.Outcome`), forwarded to `ObanClaude.run/2`. It
+      must return the `{oban_return, payload}` envelope (e.g.
+      `{{:cancel, :blocked}, error}`), not a flat verdict like `{:cancel, :blocked}` --
+      `run/2` raises on the latter, which Oban would otherwise treat as success.
+    * `:query_fun` -- a `t:ObanClaude.query_fun/0`, the claude entrypoint
+      (defaults to `&ClaudeWrapper.query/2`), forwarded to `ObanClaude.run/2`;
+      override to stub claude in tests.
 
   It injects a `perform/1` that merges the worker defaults under the job args, runs
   `ObanClaude.run/2`, calls `c:handle_result/2` on success, and passes a
