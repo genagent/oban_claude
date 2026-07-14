@@ -377,6 +377,19 @@ mix oban_claude.run "summarize the repo" --working-dir . --permission-mode plan
 `{:ok, %Result{}}` / `{:error, %Error{}}`. Override it to stub claude in tests
 without a live call, or to route through a different `claude_wrapper` entrypoint.
 
+[`ObanClaude.Testing`](https://hexdocs.pm/oban_claude/ObanClaude.Testing.html)
+builds those stub returns without hard-coding `claude_wrapper`'s structs --
+`respond/1`, `fail/1`, and `sequence/1` (for retry paths) hand you a ready
+`:query_fun`, and `result/1` / `structured_result/2` / `error/2` build the bare
+structs for a `handle_result/2` unit test:
+
+```elixir
+import ObanClaude.Testing
+
+assert {:ok, _} = ObanClaude.run(%{"prompt" => "x"}, query_fun: respond("done"))
+assert {{:cancel, :auth}, _} = ObanClaude.run(%{"prompt" => "x"}, query_fun: fail(:auth))
+```
+
 ## What it does NOT do
 
 No state, no daemon, no "sink". It runs the agent and returns the

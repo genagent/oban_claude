@@ -160,10 +160,11 @@ if Code.ensure_loaded?(Igniter) do
       end
 
       @doc false
-      # Offline stand-in for `ClaudeWrapper.query/2`. Delete the `query_fun`
-      # option above to run the real claude CLI instead.
+      # Offline stand-in for `ClaudeWrapper.query/2`, built with
+      # `ObanClaude.Testing` (so it never hard-codes claude_wrapper's struct).
+      # Delete the `query_fun` option above to run the real claude CLI instead.
       def demo_query(prompt, _opts) do
-        {:ok, %ClaudeWrapper.Result{result: "demo run for: #{prompt}", is_error: false, cost_usd: 0.0}}
+        {:ok, ObanClaude.Testing.result("demo run for: #{prompt}")}
       end
       ''')
     end
