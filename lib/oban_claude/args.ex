@@ -15,6 +15,14 @@ defmodule ObanClaude.Args do
     model: [type: :string, doc: "Model name, e.g. `\"sonnet\"` or `\"opus\"`."],
     fallback_model: [type: :string, doc: "Model to fall back to if the primary is unavailable."],
     working_dir: [type: :string, doc: "Directory claude runs in."],
+    binary: [
+      type: :string,
+      doc:
+        "Path to the `claude` CLI binary. Pin a known-good version per worker " <>
+          "(e.g. in `defaults/1`) so a PATH auto-update mid-batch can't drift the " <>
+          "run -- pairs well with `hermetic`. (The wrapper's `:bundled` mode is not " <>
+          "exposed here; use a custom `:query_fun` for that.)"
+    ],
     add_dir: [
       type: {:or, [{:list, :string}, :string]},
       doc: "Extra directories claude may access -- a single path or a list of paths."
