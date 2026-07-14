@@ -185,6 +185,14 @@ MyApp.IssueWorker.new(ObanClaude.Args.new(prompt: issue_text, worktree: "issue-#
 |> Oban.insert()
 ```
 
+Before running this against real repos, read the fleet-safety sections of the
+*Agent worker patterns* guide: an unattended fleet has to reckon with process
+lifecycle (a timed-out or cancelled run keeps spending unless you use `forcola`),
+retry cost (`max_attempts: 1` for mutating jobs -- retries are paid and repeat
+writes), wall-clock timeouts, deploy/crash recovery, and untrusted input (fence
+external issue/PR text; prefer propose/dispose). Each is a real footgun, not a
+nicety.
+
 ## Structured output (propose / dispose)
 
 Pass a `json_schema` (a JSON Schema string) and claude returns a validated
@@ -259,7 +267,7 @@ via `:classifier`):
 | `:command_failed` / `:json` / `:io` | `{:error, kind}` | likely transient; retry + backoff |
 | missing/unrunnable binary (`:io` + `:enoent`/`:eacces`) | `{:cancel, :binary_not_found}` | the CLI is absent or not executable; re-fails identically |
 | `:auth` (other reasons) and other config/env faults | `{:cancel, kind}` | the broken environment re-fails identically; retrying cannot help |
-| `:budget_exceeded` / `:max_turns_exceeded` | `{:cancel, ...}` | the rails stopped it; resume/re-scope is deliberate |
+| `:max_budget_exceeded` / `:max_turns_exceeded` | `{:cancel, ...}` | the rails stopped it; resume/re-scope is deliberate |
 
 The default mapping never returns `{:snooze, _}`: Oban implements snooze by
 *incrementing* `max_attempts`, so a deterministically-failing job would snooze

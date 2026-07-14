@@ -48,6 +48,9 @@ end
 defmodule RoutineWorker do
   use ObanClaude.Worker,
     queue: :routine,
+    # Explicit: Oban's default is 20, and every retry is a fresh paid run (see
+    # the fleet-safety guide for the cost math and when to lower this).
+    max_attempts: 3,
     args: %{"prompt" => "Summarize what changed in the repo since yesterday."},
     query_fun: &__MODULE__.fake_query/2
 

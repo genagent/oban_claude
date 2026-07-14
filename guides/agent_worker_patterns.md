@@ -26,9 +26,12 @@ A job runs with no human watching, so a full-auto worker needs three things.
    A per-job `worktree: "issue-42"` (a named worktree) overrides the default and
    lets a chain of jobs share one worktree.
 
-2. **Guardrails.** A one-shot job has no one to stop it. Cap it with `max_turns`
-   and `max_budget_usd`; the default classifier turns `:max_turns_exceeded` /
-   `:budget_exceeded` into `{:cancel, _}`. These are load-bearing, not optional.
+2. **Guardrails.** A one-shot job has no one to stop it. Cap it with `max_turns`,
+   `max_budget_usd`, and a wall-clock `timeout`; the default classifier turns
+   `:max_turns_exceeded` / `:max_budget_exceeded` into `{:cancel, _}`. These are
+   load-bearing, not optional -- and `max_turns`/`max_budget_usd` live *inside*
+   the CLI, so they cannot fire if the CLI itself wedges; that is what the
+   args-level `timeout` is for (see [Timeouts and stuck runs](#timeouts-and-stuck-runs)).
 
 3. **A single-turn, anti-park system prompt.** A queue job runs once with no
    follow-up turn. If the repo's own conventions say "open a PR, then watch CI,"
@@ -41,6 +44,14 @@ A job runs with no human watching, so a full-auto worker needs three things.
    opened the draft PR your job is complete -- end immediately. Never wait for a
    notification or watch CI, even if repository conventions say to.
    ```
+
+Those three pillars keep a *single* job well-behaved. Running a *fleet* of them
+unattended adds four more concerns, each a real footgun covered at the end of
+this guide: [Retries cost money](#retries-cost-money-and-may-repeat-writes),
+[Timeouts and stuck runs](#timeouts-and-stuck-runs),
+[Process lifecycle](#process-lifecycle-kill-the-cli-not-just-the-task),
+[Deploys and crash recovery](#deploys-and-crash-recovery), and
+[Untrusted input](#untrusted-input).
 
 ## Issue-work worker: issue -> draft PR
 
@@ -126,7 +137,7 @@ defmodule MyApp.AuditWorker do
     case ObanClaude.structured(result) do
       %{"overall" => verdict, "findings" => findings} ->
         report(verdict, findings)
-        if verdict == "blockers", do: {:error, :blockers}, else: :ok
+        if verdict == "blockers", do: {:cancel, :blockers}, else: :ok
 
       _ ->
         :ok
@@ -142,6 +153,12 @@ ObanClaude.Args.new(prompt: audit_prompt, json_schema: my_schema)
 
 `ObanClaude.structured/1` reads the whole validated object; `ObanClaude.outcome/1`
 is the shorthand for a top-level `"outcome"` key.
+
+Note the terminal verdict returns `{:cancel, :blockers}`, not `{:error, _}`: the
+claude run *succeeded* -- it produced a valid verdict -- so `{:error, _}` would
+re-run the entire paid audit (up to `max_attempts` times) only to reach the same
+conclusion. `{:cancel, _}` is a clean terminal signal. Reserve `{:error, _}` for
+failures a re-run could actually fix (see [Retries cost money](#retries-cost-money-and-may-repeat-writes)).
 
 ## Pipeline: plan -> implement -> merge-when-green
 
@@ -226,3 +243,106 @@ structured "not ready yet" verdict and let `handle_result/2` snooze.
 - **Concurrency.** Independent jobs run concurrently, each in its own named
   worktree. Serialize (queue concurrency 1) only where later jobs depend on
   earlier ones landing (e.g. sequential merges into one branch).
+
+## Retries cost money (and may repeat writes)
+
+Every retry is a *fresh, full-price* claude run, and `max_budget_usd` caps a
+single attempt, not the job. Worst-case spend per job is therefore
+`max_attempts × max_budget_usd` (plus a little overspend -- the cap is checked
+after each step, so a run can overshoot before it trips). Oban's default
+`max_attempts` is **20**, so a worker that omits it can re-run a $2 job twenty
+times.
+
+- **Set `max_attempts` explicitly on every worker.** A mutating (full-auto)
+  worker should use `max_attempts: 1` unless its prompt is genuinely idempotent
+  -- retrying a run that already pushed a branch just does it again. Reserve
+  retries for read-only / propose-only workers, where a re-run is cheap and safe.
+- **Do not map a *successful* run to `{:error, _}`.** A run that produced a valid
+  result succeeded, even when the *content* is a "blockers" verdict. Returning
+  `{:error, _}` from `handle_result/2` re-runs the whole paid call; use
+  `{:cancel, reason}` for a terminal verdict, and `{:error, _}` only when a
+  re-run could actually change the outcome.
+
+## Timeouts and stuck runs
+
+Nothing is time-bounded by default: the args-level `:timeout` is unset (the CLI
+call blocks indefinitely) and `Oban.Worker`'s `timeout/1` defaults to
+`:infinity`. `max_turns` and `max_budget_usd` live *inside* the CLI and cannot
+fire if the CLI itself wedges -- a network stall, a deadlocked stdio MCP server,
+an unexpected interactive prompt. A wedged job holds its concurrency slot
+indefinitely and emits no telemetry.
+
+- **Set the args-level `:timeout`** (milliseconds) on every fleet worker, e.g.
+  `timeout: :timer.minutes(15)`. This is the timeout that produces the typed
+  `:timeout` error the classifier understands.
+- **Do not reach for Oban's `timeout/1` as the fix.** It kills only the BEAM
+  task; under the default runner the claude OS process keeps running (and
+  spending) while Oban records a failure and retries -- now you have a duplicate
+  paid run *and* an orphan. Keep `timeout/1` at `:infinity`, or strictly above
+  the args `:timeout`. (See the next section for making a kill actually kill.)
+
+## Process lifecycle: kill the CLI, not just the task
+
+`oban_claude` runs the CLI synchronously inside the Oban job process. Under
+claude_wrapper's **default** runner, killing that process -- an Oban timeout, an
+`Oban.cancel_job`, a node shutdown -- closes the pipes but sends *no signal to
+the OS process*: the `claude` CLI and its MCP-server children keep running and
+usually finish, committing / pushing / opening a PR minutes after you believed
+the job stopped.
+
+For any fleet, switch to the leak-free runner claude_wrapper ships:
+
+```elixir
+# mix.exs
+{:forcola, "~> 0.3"}
+
+# config/runtime.exs (or config.exs)
+config :claude_wrapper, runner: ClaudeWrapper.Runner.Forcola
+```
+
+It process-groups the CLI and SIGTERM/SIGKILLs the whole tree on timeout,
+cancel, or BEAM death. Without it, a timed-out or cancelled run is still
+executing -- which makes an immediate retry a double-spend / two-agents-on-one-
+worktree hazard.
+
+## Deploys and crash recovery
+
+A claude job is **paid and non-idempotent**, which makes ordinary deploys the
+sharp edge. Oban's `shutdown_grace_period` defaults to **15 seconds** -- far
+below any real run -- so a deploy that catches a job mid-run abandons it in the
+`executing` state (and, on the default runner, the CLI survives BEAM death and
+finishes unsupervised).
+
+- **Pause the claude queues before a deploy** (`Oban.pause_queue/2`), or raise
+  `shutdown_grace_period` above your worst-case run.
+- **Configure `Oban.Plugins.Lifeline`** to rescue orphaned `executing` jobs --
+  it is opt-in (the default is `plugins: []`). But rescue is purely time-based:
+  a healthy long run rescued mid-flight becomes a *second* concurrent paid run,
+  so set `rescue_after` comfortably above your args `:timeout`, and pair it with
+  forcola so the predecessor is actually dead first.
+- With `max_attempts: 1`, Lifeline turns a rescued crash into a silent *discard*
+  -- the work never happens and nothing retries. Choose deliberately.
+- **Guard chained stages with `unique`.** `handle_result/2` enqueues the next
+  stage non-atomically with the job completing, so a crash in between can re-run
+  a stage *and* double-enqueue the next. A short `unique` window on the
+  follow-on worker prevents the duplicate.
+
+## Untrusted input
+
+The full-auto and issue-work recipes interpolate external text (a GitHub issue
+title/body, a webhook payload) into the prompt and run the agent with
+`permission_mode: :bypass_permissions`, which auto-approves every tool call. That
+agent can run arbitrary Bash and read anything the BEAM user can (`~/.ssh`,
+`~/.aws`, the environment). A worktree isolates the *git checkout* -- not the
+filesystem, network, or credentials. **Treat any externally sourced text as
+adversarial:** whoever can file an issue can try to steer the agent.
+
+For externally triggered work:
+
+- Prefer the **propose / dispose** split: run read-only (`permission_mode:
+  :default`), return a typed verdict, and let app-side code (an effector) make
+  the change. The agent never holds write authority over untrusted input.
+- When full-auto is unavoidable: **fence** the external text in the prompt
+  (delimit it and tell the model it is untrusted data, not instructions), pin
+  `disallowed_tools`, seal the environment with `hermetic: :full`, run under an
+  OS user with minimal credentials, and require human review before merge.

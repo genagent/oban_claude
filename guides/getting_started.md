@@ -172,6 +172,18 @@ ObanClaude.Args.new(prompt: "Summarize the mix.exs in this project.",
 |> Oban.insert()
 ```
 
+Two things change once the calls are real (and paid):
+
+- **`max_attempts`.** This guide kept the worker at `max_attempts: 3`, but a
+  retry is a *fresh paid run* -- worst-case spend is `max_attempts ×
+  max_budget_usd`. Lower it (a mutating worker should use `max_attempts: 1`)
+  unless a re-run can genuinely change the outcome.
+- **`timeout`.** Set an args-level `timeout` (e.g. `timeout: :timer.minutes(10)`)
+  so a wedged CLI cannot block the queue indefinitely.
+
+The [Agent worker patterns](agent_worker_patterns.html) guide has the full
+fleet-safety checklist (process lifecycle, deploys, untrusted input).
+
 ## Where to next
 
 - [Workers as task definitions](readme.html#workers-as-task-definitions) -- how

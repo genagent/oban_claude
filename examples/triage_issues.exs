@@ -234,8 +234,10 @@ end
 
 # --- Wait for the queue to settle -------------------------------------------
 # Real claude calls take seconds each; the stub is instant. Give live mode a
-# real budget so the script does not exit (killing in-flight calls) before the
-# jobs reach handle_result/2.
+# real deadline so the script does not exit before the jobs reach
+# handle_result/2. Note that exiting does NOT kill in-flight CLI processes under
+# the default runner -- it orphans them (they keep running); use the Forcola
+# runner for a fleet. See the "Process lifecycle" fleet-safety guide section.
 terminal = ~w(completed cancelled discarded)
 total = length(issues)
 deadline_ms = if live?, do: 180_000, else: 10_000
