@@ -99,10 +99,27 @@ defmodule ObanClaude.ArgsTest do
              }
     end
 
-    test "explicit claude options win over a colliding meta key" do
-      args = Args.new(prompt: "x", model: "sonnet", meta: %{"model" => "should-lose"})
+    test "a meta key colliding with a claude option raises (no silent escalation)" do
+      assert_raise ArgumentError, ~r/collides with the claude option/, fn ->
+        Args.new(prompt: "x", model: "sonnet", meta: %{"model" => "should-lose"})
+      end
+    end
 
-      assert args["model"] == "sonnet"
+    test "a meta key colliding with prompt raises" do
+      assert_raise ArgumentError, ~r/collides with the claude option/, fn ->
+        Args.new(prompt: "x", meta: %{"prompt" => "smuggled"})
+      end
+    end
+
+    test "a non-JSON-encodable meta value raises at build time, naming the key" do
+      assert_raise ArgumentError, ~r/"range" is not JSON-encodable/, fn ->
+        Args.new(prompt: "x", meta: %{"range" => {1, 5}})
+      end
+    end
+
+    test "JSON-clean meta values (numbers, booleans, nested maps/lists) are accepted" do
+      assert Args.new(prompt: "x", meta: %{"n" => 42, "ok" => true, "nested" => %{"a" => [1, 2]}}) ==
+               %{"prompt" => "x", "n" => 42, "ok" => true, "nested" => %{"a" => [1, 2]}}
     end
 
     test "works with defaults/1 too" do
@@ -157,10 +174,24 @@ defmodule ObanClaude.ArgsTest do
              }
     end
 
+    test "accepts true as an alias for :full (parity with the raw-map path)" do
+      assert Args.new(prompt: "x", hermetic: true)["hermetic"] == true
+    end
+
     test "rejects a scope outside the vocabulary" do
       assert_raise NimbleOptions.ValidationError, ~r/invalid value for :hermetic/, fn ->
         Args.new(prompt: "x", hermetic: :bare)
       end
+    end
+  end
+
+  describe "add_dir" do
+    test "accepts a list of paths" do
+      assert Args.new(prompt: "x", add_dir: ["/a", "/b"])["add_dir"] == ["/a", "/b"]
+    end
+
+    test "accepts a single path string (parity with the raw-map and query paths)" do
+      assert Args.new(prompt: "x", add_dir: "/a")["add_dir"] == "/a"
     end
   end
 

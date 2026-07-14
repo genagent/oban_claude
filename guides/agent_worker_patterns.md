@@ -115,7 +115,11 @@ typed verdict via `--json-schema`. This is the propose/dispose split: the agent
 defmodule MyApp.AuditWorker do
   use ObanClaude.Worker,
     queue: :audit,
-    args: ObanClaude.Args.defaults(working_dir: "/repo", permission_mode: :default, append_system_prompt: "…read-only, single-turn…")
+    args: ObanClaude.Args.defaults(working_dir: "/repo", append_system_prompt: "…read-only, single-turn…"),
+    # `permission_mode` is this worker's safety property, so pin it: `:pinned_args`
+    # merges over the job, so an inserted job cannot escalate to full-write by
+    # supplying its own `permission_mode`. (In `:args` it would only be a default.)
+    pinned_args: ObanClaude.Args.defaults(permission_mode: :default)
 
   @impl ObanClaude.Worker
   def handle_result(result, _job) do

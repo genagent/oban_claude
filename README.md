@@ -75,6 +75,26 @@ end
 MyApp.PrReview.new(%{"prompt" => "PR #4321: " <> diff}) |> Oban.insert()
 ```
 
+Because the job wins the merge, `:args` are **defaults, not guardrails** — a job
+can override any of them, including `permission_mode` or a budget cap. To make a
+key worker-invariant, put it in `:pinned_args`, which merges *over* the job
+(precedence: `pinned_args > job > args`):
+
+```elixir
+defmodule MyApp.ReadOnlyAudit do
+  use ObanClaude.Worker,
+    queue: :audit,
+    args: %{"model" => "sonnet"},
+    # a job cannot escalate these, even by supplying the same key
+    pinned_args: %{"permission_mode" => "default", "max_budget_usd" => 2.0}
+end
+```
+
+This matters when job args come from a semi-trusted source (a webhook, an exposed
+enqueue API). Both maps must be string-keyed (atom keys raise at compile time),
+and a job with malformed args (a missing prompt, an unknown `permission_mode`)
+dead-letters as `{:cancel, {:invalid_args, _}}` rather than retrying to exhaustion.
+
 With no `:args`, a worker is a bare passthrough (the job carries everything). With
 everything in `:args` and an empty job it is a routine: pair it with
 `Oban.Plugins.Cron` for a scheduled claude task.

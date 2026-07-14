@@ -103,6 +103,17 @@ defmodule ObanClaude.WorkerTest do
     def perform(%Oban.Job{}), do: {:cancel, :overridden}
   end
 
+  defmodule PinnedWorker do
+    use ObanClaude.Worker,
+      queue: :test,
+      query_fun: &ObanClaude.WorkerTest.echo/2,
+      args: %{"model" => "haiku"},
+      pinned_args: %{"permission_mode" => "plan"}
+
+    @impl ObanClaude.Worker
+    def handle_result(result, _job), do: {:ok, result.result}
+  end
+
   defp job(args), do: %Oban.Job{args: args}
 
   test "the default handle_result/2 returns :ok on a clean result" do
@@ -144,13 +155,63 @@ defmodule ObanClaude.WorkerTest do
     assert {:cancel, :always} = ClassifierWorker.perform(job(%{"prompt" => "x"}))
   end
 
-  test "a worker whose classifier returns a flat verdict raises through perform/1" do
-    assert_raise ArgumentError, ~r/envelope/, fn ->
-      FlatClassifierWorker.perform(job(%{"prompt" => "x"}))
-    end
+  test "a worker whose classifier returns a flat verdict cancels with :invalid_args" do
+    assert {:cancel, {:invalid_args, message}} =
+             FlatClassifierWorker.perform(job(%{"prompt" => "x"}))
+
+    assert message =~ "envelope"
   end
 
   test "perform/1 is overridable" do
     assert {:cancel, :overridden} = PerformOverrideWorker.perform(job(%{"prompt" => "x"}))
+  end
+
+  test "pinned_args win over job args, while non-pinned defaults still yield to the job" do
+    {:ok, captured} =
+      PinnedWorker.perform(
+        job(%{"prompt" => "x", "permission_mode" => "bypass_permissions", "model" => "sonnet"})
+      )
+
+    # pinned key: the worker wins even though the job supplied it
+    assert captured =~ "permission_mode: :plan"
+    # non-pinned default: the job still wins
+    assert captured =~ ~s(model: "sonnet")
+  end
+
+  describe "args validation at the seam (#75)" do
+    test "a missing prompt cancels as :invalid_args instead of raising (no retry storm)" do
+      assert {:cancel, {:invalid_args, message}} = DefaultWorker.perform(job(%{}))
+      assert message =~ "prompt"
+    end
+
+    test "an unknown permission_mode cancels as :invalid_args" do
+      assert {:cancel, {:invalid_args, message}} =
+               DefaultWorker.perform(
+                 job(%{"prompt" => "x", "permission_mode" => "bypassPermissions"})
+               )
+
+      assert message =~ "permission_mode"
+    end
+
+    test "the :invalid_args message omits the args map (no prompt/meta leak)" do
+      assert {:cancel, {:invalid_args, message}} =
+               DefaultWorker.perform(
+                 job(%{"system_prompt" => "secret-ish", "meta_token" => "abc"})
+               )
+
+      refute message =~ "secret-ish"
+      refute message =~ "abc"
+    end
+
+    test "__validate_arg_keys__! rejects non-binary keys and accepts string keys" do
+      assert_raise ArgumentError, ~r/keys must be strings/, fn ->
+        ObanClaude.Worker.__validate_arg_keys__!(__MODULE__, :args, %{model: "haiku"})
+      end
+
+      assert :ok =
+               ObanClaude.Worker.__validate_arg_keys__!(__MODULE__, :args, %{"model" => "haiku"})
+
+      assert :ok = ObanClaude.Worker.__validate_arg_keys__!(__MODULE__, :pinned_args, %{})
+    end
   end
 end

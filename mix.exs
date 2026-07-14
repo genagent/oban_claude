@@ -49,6 +49,10 @@ defmodule ObanClaude.MixProject do
       # Schema for `ObanClaude.Args`: validates the builder's options and
       # generates their documentation from a single source of truth.
       {:nimble_options, "~> 1.1"},
+      # Used to verify `:meta` values are JSON-clean at build time (the same
+      # encoder Oban serializes args with), so a bad value fails at construction
+      # rather than deep inside `Oban.insert`.
+      {:jason, "~> 1.4"},
       {:telemetry, "~> 1.2"},
       # Dev/test only: powers the `mix oban_claude.install` Igniter task. The
       # task module only compiles when Igniter is loaded, so it never ships as a
