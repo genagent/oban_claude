@@ -29,6 +29,26 @@ defmodule ObanClaude.Args do
     ],
     system_prompt: [type: :string, doc: "Replace claude's system prompt."],
     append_system_prompt: [type: :string, doc: "Append to claude's system prompt."],
+    system_prompt_file: [
+      type: :string,
+      doc:
+        "Replace claude's system prompt from a file path (avoids the argv size " <>
+          "limit a large inline `system_prompt` would hit)."
+    ],
+    append_system_prompt_file: [
+      type: :string,
+      doc: "Append to claude's system prompt from a file path."
+    ],
+    permission_prompt_tool: [
+      type: :string,
+      doc:
+        "Delegate permission decisions to a custom MCP tool (e.g. " <>
+          "`\"mcp__gate__approve\"`) for programmatic headless gating."
+    ],
+    max_thinking_tokens: [
+      type: :pos_integer,
+      doc: "Cap the thinking-token budget -- finer control than `effort`."
+    ],
     permission_mode: [
       type: {:in, [:default, :accept_edits, :bypass_permissions, :dont_ask, :plan, :auto]},
       doc: "How claude handles tool-permission prompts."

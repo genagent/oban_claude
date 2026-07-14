@@ -122,13 +122,19 @@ defmodule ObanClaude do
   # strings/booleans, so they need no coercion. `continue_session` is
   # deliberately excluded: `--continue` resumes the host's *most recent* session,
   # which cross-contaminates under concurrent workers; use explicit `resume:`.
+  # The `*_file` / `permission_prompt_tool` / `max_thinking_tokens` keys are the
+  # one-shot query flags claude_wrapper 0.14.0 exposed: prompt-from-file (dodges
+  # ARG_MAX on a large system prompt), a custom permission-gating MCP tool, and a
+  # thinking-token cap. All JSON-clean strings/ints, so no coercion.
   # The sibling wrapper key `:env` is deliberately NOT surfaced: env vars in the
   # args map would sit plaintext in the oban_jobs table (a secrets-at-rest
   # hazard) -- resolve env inside the run instead.
   @passthrough ~w(model max_turns max_budget_usd working_dir permission_mode timeout
                   system_prompt append_system_prompt fallback_model add_dir json_schema
                   allowed_tools disallowed_tools mcp_config effort agent worktree hermetic
-                  binary resume session_id no_session_persistence fork_session)
+                  binary resume session_id no_session_persistence fork_session
+                  system_prompt_file append_system_prompt_file permission_prompt_tool
+                  max_thinking_tokens)
 
   # String key -> atom key, resolved at COMPILE time so the atoms always exist.
   # `String.to_existing_atom/1` would depend on ClaudeWrapper.Query (the module
