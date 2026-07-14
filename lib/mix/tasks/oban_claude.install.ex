@@ -143,10 +143,12 @@ if Code.ensure_loaded?(Igniter) do
       # explicit because every retry is a fresh paid run -- use 1 for a mutating
       # worker; `timeout` bounds a wedged CLI; add `forcola` + the runner config
       # so a timed-out or cancelled run is actually killed, not orphaned.
+      # `hermetic: :full` seals the ambient ~/.claude + repo .claude config so the
+      # run's surface is exactly these args (recommended for any fleet worker).
       use ObanClaude.Worker,
         queue: :claude,
         max_attempts: 3,
-        args: ObanClaude.Args.defaults(worktree: true, timeout: :timer.minutes(10)),
+        args: ObanClaude.Args.defaults(worktree: true, timeout: :timer.minutes(10), hermetic: :full),
         query_fun: &__MODULE__.demo_query/2
 
       require Logger
@@ -262,6 +264,9 @@ if Code.ensure_loaded?(Igniter) do
           not orphaned;
         * add {Oban.Plugins.Lifeline, rescue_after: <above your args timeout>}
           to the Oban `plugins:` so jobs orphaned by a deploy are rescued;
+        * add {Oban.Plugins.Pruner, max_age: <sized to data sensitivity>} -- job
+          args (prompt, system_prompt, meta) are stored plaintext in oban_jobs
+          and kept forever without it. Never put secrets/PII in a prompt;
         * keep `max_attempts` low (retries are paid) and raise
           `shutdown_grace_period` above your worst-case run.
       """

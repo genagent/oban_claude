@@ -28,6 +28,7 @@ defmodule Mix.Tasks.ObanClaude.InstallTest do
     assert worker =~ "query_fun: &__MODULE__.demo_query/2"
     assert worker =~ "worktree: true"
     assert worker =~ "timeout: :timer.minutes(10)"
+    assert worker =~ "hermetic: :full"
     assert worker =~ "max_attempts: 3"
   end
 
