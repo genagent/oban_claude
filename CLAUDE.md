@@ -13,7 +13,7 @@ Lifeline, Pruner); claude_wrapper owns running claude.
 - `ObanClaude.Args.new/1` / `defaults/1` -- the validated builder (atom keys in, the string map out); `defaults/1` is prompt-optional for worker `:args`, and a `:meta` map rides through untouched. `worktree` and the session keys (`resume`, `session_id`, `fork_session`, `no_session_persistence`) are normal options.
 - `ObanClaude.Outcome.classify/1` -- the default, overridable outcome -> Oban-return mapping.
 - `ObanClaude.outcome/1` and `structured/1` -- read structured output from a `--json-schema` run. `ObanClaude.session_id/1` / `cost_usd/1` -- read the resume handle / spend off a `%Result{}` or a rail-stop `%Error{}`.
-- `mix oban_claude.run` -- fire one claude run from the CLI. `mix oban_claude.install` -- Igniter installer that scaffolds a SQLite-backed setup (needs Igniter present first).
+- `mix oban_claude` -- a `cheer` command tree: `run` (one queueless claude run), `doctor` (fleet pre-flight: binary/version/auth), `args` (dry-run print `Args.new/1`). Shared parsing/rendering lives in `ObanClaude.CLI` (+ `ObanClaude.CLI.{Run,Doctor,Args}`). `mix oban_claude.install` -- Igniter installer that scaffolds a SQLite-backed setup (needs Igniter present first).
 
 ## Scope
 

@@ -373,13 +373,23 @@ mix deps.get
 mix igniter.install oban_claude
 ```
 
-For a single run with no queue or database, `mix oban_claude.run` sends CLI flags
-through the same `Args.new/1` vocabulary and prints the `{oban_return, result}`
-verdict (add `--json` for a machine-readable summary):
+The `mix oban_claude` command tree (a [`cheer`](https://hexdocs.pm/cheer)
+CLI) runs claude straight from the shell — no queue, no database. Every `run` /
+`args` flag maps to the same `Args.new/1` vocabulary; `mix oban_claude <cmd>
+--help` lists them.
 
 ```bash
-mix oban_claude.run "summarize the repo" --working-dir . --permission-mode plan
+# one queueless run, printing the {oban_return, result} verdict (--json for a summary)
+mix oban_claude run "summarize the repo" --working-dir . --permission-mode plan
+
+# a fleet pre-flight check: is claude present, a usable version, and authenticated?
+mix oban_claude doctor
+
+# build and print the validated args map from flags, without running claude
+mix oban_claude args "review this" --model sonnet --allowed-tools Read
 ```
+
+(Scaffolding a project is separate: `mix oban_claude.install`, an Igniter task.)
 
 ## Testing
 
