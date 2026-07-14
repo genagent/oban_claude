@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
 
+# Queue release runs (never cancel a publish mid-flight); a rapid second merge
+# waits rather than racing release-please into a "Reference already exists" fail.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   pull-requests: write
@@ -29,7 +35,12 @@ jobs:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     steps:
+      # Check out the released tag, not the triggering sha: release-please tags
+      # the release-PR merge commit, which is not necessarily the commit that
+      # triggered this run, so the tarball must come from the tag.
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
 
       - uses: erlef/setup-beam@v1
         with:
@@ -38,6 +49,19 @@ jobs:
 
       - name: Install dependencies
         run: mix deps.get
+
+      # Gate the publish on the same checks CI runs. `mix hex.publish` compiles
+      # and builds docs, so a hard compile error already aborts -- but failing
+      # tests, compile/doc warnings, and format/credo regressions would publish
+      # cleanly without this (main has no required-status-check protection).
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      - name: Test
+        run: mix test
+
+      - name: Docs (warnings as errors)
+        run: mix docs --warnings-as-errors
 
       - name: Publish
         env:
