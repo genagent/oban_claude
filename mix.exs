@@ -57,6 +57,11 @@ defmodule ObanClaude.MixProject do
       # encoder Oban serializes args with), so a bad value fails at construction
       # rather than deep inside `Oban.insert`.
       {:jason, "~> 1.4"},
+      # Backs the `mix oban_claude` command tree (run/doctor/args): parsing,
+      # validation, help, and completion from one declarative command definition.
+      # A regular dep (the tasks are user-facing, unlike the dev-only Igniter
+      # installer), but zero-runtime-dependencies, so it stays light.
+      {:cheer, "~> 0.2"},
       # `~> 1.3`, not `~> 1.2`: oban `~> 2.23` already requires telemetry 1.3+,
       # so a 1.2.x floor is unsatisfiable in any valid resolution.
       {:telemetry, "~> 1.3"},
