@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.2.0](https://github.com/genagent/oban_claude/compare/v0.1.0...v0.2.0) (2026-07-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* the one-shot CLI moved from `mix oban_claude.run "..."` to `mix oban_claude run "..."` (a cheer subcommand). The prompt is still the first positional argument and every flag is unchanged; `--prompt` is dropped in favor of the positional.
+
+### Features
+
+* add :binary passthrough; make the Args&lt;-&gt;passthrough round-trip exhaustive ([#105](https://github.com/genagent/oban_claude/issues/105)) ([f076da7](https://github.com/genagent/oban_claude/commit/f076da7cfeeafbe6170d6ed1feb10231047a03cf))
+* add ObanClaude.Testing, a builder for :query_fun stub returns ([#107](https://github.com/genagent/oban_claude/issues/107)) ([e2a41e5](https://github.com/genagent/oban_claude/commit/e2a41e5e7beda41dedffd9f196d60ff0661f1777)), closes [#81](https://github.com/genagent/oban_claude/issues/81)
+* expose claude_wrapper's :hermetic config seal as an args option ([#59](https://github.com/genagent/oban_claude/issues/59)) ([5610800](https://github.com/genagent/oban_claude/commit/5610800e419f00453b38733db345a70e6baa9f1c)), closes [#58](https://github.com/genagent/oban_claude/issues/58)
+* harden the mix tasks and telemetry for unattended fleets ([#100](https://github.com/genagent/oban_claude/issues/100)) ([de56cee](https://github.com/genagent/oban_claude/commit/de56ceeca825be91d8d806dd2af55d9dcf74c07a))
+* pin worker args, harden :meta, validate args at the seam ([#98](https://github.com/genagent/oban_claude/issues/98)) ([509fd1c](https://github.com/genagent/oban_claude/commit/509fd1c36aaffaad97ddbaf4225993e4d8fddd7e))
+* rebuild the CLI as a cheer `mix oban_claude` command tree (run/doctor/args) ([#109](https://github.com/genagent/oban_claude/issues/109)) ([7b29683](https://github.com/genagent/oban_claude/commit/7b29683dca675b89cbe9d2f40a51a48ddd4d58b2)), closes [#102](https://github.com/genagent/oban_claude/issues/102)
+* session continuity + job-aware error handling (handle_error/3) ([#108](https://github.com/genagent/oban_claude/issues/108)) ([700ef86](https://github.com/genagent/oban_claude/commit/700ef8609487557055e0cfef64bc434d32ad5f36))
+
+
+### Bug Fixes
+
+* cancel :max_budget_exceeded rail stop instead of retrying it ([#56](https://github.com/genagent/oban_claude/issues/56)) ([f410ed1](https://github.com/genagent/oban_claude/commit/f410ed12e0aa630b69ef8ce2fea546f595704cfe)), closes [#55](https://github.com/genagent/oban_claude/issues/55)
+* **ci:** harden the release workflow before publishing to Hex ([#101](https://github.com/genagent/oban_claude/issues/101)) ([f7b450c](https://github.com/genagent/oban_claude/commit/f7b450ccf23a48af4d5f4b2963bec6f1b5c58141)), closes [#66](https://github.com/genagent/oban_claude/issues/66)
+* classifier correctness pass — bounded retries, envelope validation, accurate specs ([#97](https://github.com/genagent/oban_claude/issues/97)) ([0b78b3b](https://github.com/genagent/oban_claude/commit/0b78b3bc5b6c0829c339c66ce97f5ba54bbe947d))
+
 ## [0.1.0](https://github.com/genagent/oban_claude/releases/tag/v0.1.0) (2026-07-01)
 
 
