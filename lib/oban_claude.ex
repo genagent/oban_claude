@@ -53,16 +53,32 @@ defmodule ObanClaude do
     * Metadata:
       * `:result` -- the `%ClaudeWrapper.Result{}` struct
       * `:args` -- the string-keyed args map passed to `run/2`
+      * `:job` -- a slim map `%{id, queue, worker, attempt, max_attempts, meta}`
+        for the `Oban.Job`, or `nil` when `run/2` was called without `:job`
 
   ### `[:oban_claude, :run, :exception]`
 
-  Emitted when `ClaudeWrapper.query/2` returns `{:error, %ClaudeWrapper.Error{}}`.
+  Emitted when the query returns `{:error, _}` -- both a typed
+  `%ClaudeWrapper.Error{}` and an off-contract error term (which the classifier
+  cancels, so it still surfaces here).
 
     * Measurements:
       * `:duration` -- wall time of the query in native time units
+      * `:cost_usd` -- the run's spend when the error carries one (a rail-stop
+        `:max_budget_exceeded` / `:max_turns_exceeded` reason map does; `0.0`
+        otherwise, including every off-contract term). Summing `:cost_usd` across
+        *both* events gives a complete spend total.
     * Metadata:
-      * `:error` -- the `%ClaudeWrapper.Error{}` struct
+      * `:error` -- the `%ClaudeWrapper.Error{}` struct, or the raw error term on
+        the off-contract path
       * `:args` -- the string-keyed args map passed to `run/2`
+      * `:job` -- as above
+
+  > #### Data handling {: .warning}
+  >
+  > `:args` (prompt, system prompt, `:meta`), `:result`, and `:error` (which can
+  > embed raw CLI stdout/stderr) all ride on these events. Redact before shipping
+  > telemetry to a log aggregator.
   """
 
   alias ClaudeWrapper.{Error, Result}
@@ -145,17 +161,25 @@ defmodule ObanClaude do
     * `:query_fun` -- a `t:query_fun/0`, the claude entrypoint. Defaults to
       `&ClaudeWrapper.query/2`. Override to stub claude in tests, or to route
       through a different wrapper entrypoint.
+    * `:job` -- the `Oban.Job` this run belongs to. Its identity (`id`, `queue`,
+      `worker`, `attempt`, `meta`) rides along in both telemetry events'
+      `:job` metadata for cost attribution. `ObanClaude.Worker` passes it
+      automatically; bare `run/2` callers may omit it (`:job` is then `nil`).
   """
-  @spec run(ObanClaude.Args.t(), [{:classifier, classifier()} | {:query_fun, query_fun()}]) ::
+  @spec run(
+          ObanClaude.Args.t(),
+          [{:classifier, classifier()} | {:query_fun, query_fun()} | {:job, Oban.Job.t()}]
+        ) ::
           {oban_return(), Result.t() | Error.t() | term()}
   def run(args, opts \\ []) when is_map(args) do
     classifier = Keyword.get(opts, :classifier, &ObanClaude.Outcome.classify/1)
     query_fun = Keyword.get(opts, :query_fun, &ClaudeWrapper.query/2)
+    job = Keyword.get(opts, :job)
     {prompt, query_opts} = build(args)
 
     start = System.monotonic_time()
     outcome = query_fun.(prompt, query_opts)
-    emit(outcome, start, args)
+    emit(outcome, start, args, job)
 
     outcome |> classifier.() |> validate_classified!(classifier)
   end
@@ -254,22 +278,55 @@ defmodule ObanClaude do
   defp valid_return?({{:snooze, {n, _unit}}, _payload}) when is_integer(n) and n > 0, do: true
   defp valid_return?(_other), do: false
 
-  defp emit({:ok, %Result{} = r}, start, args) do
+  defp emit({:ok, %Result{} = r}, start, args, job) do
     :telemetry.execute(
       [:oban_claude, :run, :stop],
       %{duration: System.monotonic_time() - start, cost_usd: r.cost_usd || 0.0},
-      %{result: r, args: args}
+      %{result: r, args: args, job: job_meta(job)}
     )
   end
 
-  defp emit({:error, %Error{} = e}, start, args) do
+  defp emit({:error, %Error{} = e}, start, args, job) do
     :telemetry.execute(
       [:oban_claude, :run, :exception],
-      %{duration: System.monotonic_time() - start},
-      %{error: e, args: args}
+      %{duration: System.monotonic_time() - start, cost_usd: error_cost(e)},
+      %{error: e, args: args, job: job_meta(job)}
     )
   end
 
-  # Telemetry must never crash the run: ignore anything off the typed contract.
-  defp emit(_outcome, _start, _args), do: :ok
+  # An off-contract error term (not a typed %Error{}) still cancels the job in
+  # the classifier, so it must still surface to telemetry. Emit :exception with
+  # the raw term as `:error` (measurements carry no cost -- there is no typed
+  # result to read one from).
+  defp emit({:error, other}, start, args, job) do
+    :telemetry.execute(
+      [:oban_claude, :run, :exception],
+      %{duration: System.monotonic_time() - start, cost_usd: 0.0},
+      %{error: other, args: args, job: job_meta(job)}
+    )
+  end
+
+  # Telemetry must never crash the run: ignore anything else off the typed contract.
+  defp emit(_outcome, _start, _args, _job), do: :ok
+
+  # A slim, cost-attribution-oriented view of the job for telemetry metadata.
+  # `nil` for bare `run/2` callers that pass no `:job`.
+  defp job_meta(%Oban.Job{} = job) do
+    %{
+      id: job.id,
+      queue: job.queue,
+      worker: job.worker,
+      attempt: job.attempt,
+      max_attempts: job.max_attempts,
+      meta: job.meta
+    }
+  end
+
+  defp job_meta(_), do: nil
+
+  # Rail-stop errors (`:max_budget_exceeded` / `:max_turns_exceeded`) carry the
+  # run's real spend in their reason map -- surface it so a dashboard summing
+  # `:stop` cost_usd does not undercount by exactly the capped (priciest) runs.
+  defp error_cost(%Error{reason: %{cost_usd: c}}) when is_number(c), do: c
+  defp error_cost(_), do: 0.0
 end

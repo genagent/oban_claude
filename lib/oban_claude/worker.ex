@@ -106,7 +106,7 @@ defmodule ObanClaude.Worker do
           |> Map.merge(args)
           |> Map.merge(@oban_claude_pinned_args)
 
-        case ObanClaude.Worker.__run__(merged, @oban_claude_opts) do
+        case ObanClaude.Worker.__run__(merged, @oban_claude_opts, job) do
           {:ok, %ClaudeWrapper.Result{} = result} -> handle_result(result, job)
           {oban_return, _payload} -> oban_return
         end
@@ -142,8 +142,8 @@ defmodule ObanClaude.Worker do
   # is a retryable failure, so Oban re-runs the job with the same broken args to
   # exhaustion -- and stores the raw args map (prompt, system prompt, meta) in
   # `oban_jobs.errors`. The message deliberately omits the arg values.
-  def __run__(args, opts) do
-    ObanClaude.run(args, opts)
+  def __run__(args, opts, job) do
+    ObanClaude.run(args, Keyword.put(opts, :job, job))
   rescue
     e in KeyError -> {{:cancel, {:invalid_args, "missing required arg #{inspect(e.key)}"}}, e}
     e in ArgumentError -> {{:cancel, {:invalid_args, Exception.message(e)}}, e}

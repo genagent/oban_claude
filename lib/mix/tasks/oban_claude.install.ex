@@ -109,9 +109,21 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     # `oban.install` writes `queues: [default: 10]`; add the `:claude` queue the
-    # sample worker runs on.
+    # sample worker runs on. Use an `:updater` that *merges* `claude: 5` into the
+    # existing keyword list rather than replacing it -- a bare `configure/5`
+    # would overwrite an app's other queues (mailers, events, ...) and silently
+    # stop them processing on the next boot.
     defp configure_claude_queue(igniter, app_name) do
-      Config.configure(igniter, "config.exs", app_name, [Oban, :queues], default: 10, claude: 5)
+      Config.configure(
+        igniter,
+        "config.exs",
+        app_name,
+        [Oban, :queues],
+        [default: 10, claude: 5],
+        updater: fn zipper ->
+          Igniter.Code.Keyword.set_keyword_key(zipper, :claude, 5, fn z -> {:ok, z} end)
+        end
+      )
     end
 
     defp create_worker(igniter, worker) do
@@ -126,10 +138,15 @@ if Code.ensure_loaded?(Igniter) do
       # `worktree: true` isolates each real run in its own git worktree (recommended
       # for full-auto workers that write to a repo). It needs `working_dir` to be a
       # git repo; the offline demo ignores it, so it is harmless until you go live.
+      #
+      # Fleet rails (see the "Agent worker patterns" guide): `max_attempts` is
+      # explicit because every retry is a fresh paid run -- use 1 for a mutating
+      # worker; `timeout` bounds a wedged CLI; add `forcola` + the runner config
+      # so a timed-out or cancelled run is actually killed, not orphaned.
       use ObanClaude.Worker,
         queue: :claude,
         max_attempts: 3,
-        args: ObanClaude.Args.defaults(worktree: true),
+        args: ObanClaude.Args.defaults(worktree: true, timeout: :timer.minutes(10)),
         query_fun: &__MODULE__.demo_query/2
 
       require Logger
@@ -159,6 +176,13 @@ if Code.ensure_loaded?(Igniter) do
       Watch demo for oban_claude: logs run telemetry and enqueues one sample job
       on boot (dev only). Delete this module and its child in your Application to
       remove the demo.
+
+      > #### Telemetry carries sensitive data {: .warning}
+      >
+      > The `:args` (prompt, system prompt, meta), `:result`, and `:error`
+      > metadata on these events can contain prompts and raw CLI stdout/stderr.
+      > This demo logs only the error *kind* and the cost; redact before shipping
+      > telemetry to a log aggregator.
       \"\"\"
       use GenServer
 
@@ -171,8 +195,15 @@ if Code.ensure_loaded?(Igniter) do
       @impl true
       def init(_) do
         :telemetry.attach_many("#{app_name}-oban-claude", @events, &__MODULE__.handle_event/4, nil)
+        # Enqueue after init returns, so a boot before `mix ecto.migrate` does not
+        # crash the app on a missing table (the enqueue is guarded below).
+        {:ok, nil, {:continue, :maybe_enqueue}}
+      end
+
+      @impl true
+      def handle_continue(:maybe_enqueue, state) do
         if dev?(), do: enqueue_sample()
-        {:ok, nil}
+        {:noreply, state}
       end
 
       # Guarded so this never crashes in a release, where Mix is unavailable.
@@ -188,14 +219,25 @@ if Code.ensure_loaded?(Igniter) do
         Logger.info("[oban_claude] run finished in \#{System.convert_time_unit(meas.duration, :native, :millisecond)}ms, cost $\#{meas.cost_usd}")
       end
 
-      def handle_event([:oban_claude, :run, :exception], _meas, meta, _) do
-        Logger.warning("[oban_claude] run errored: \#{inspect(meta.error)}")
+      def handle_event([:oban_claude, :run, :exception], meas, meta, _) do
+        # Log the error KIND, not the whole %Error{}: its :stdout/:stderr can
+        # carry raw CLI output (auth diagnostics, file paths, repo content).
+        kind =
+          case meta.error do
+            %ClaudeWrapper.Error{kind: k} -> k
+            other -> inspect(other)
+          end
+
+        Logger.warning("[oban_claude] run errored (\#{kind}), cost $\#{meas.cost_usd}")
       end
 
       defp enqueue_sample do
         ObanClaude.Args.new(prompt: "hello from oban_claude")
         |> #{inspect(worker)}.new()
         |> Oban.insert()
+      rescue
+        e ->
+          Logger.warning("[oban_claude] demo enqueue skipped -- run mix ecto.migrate first (\#{Exception.message(e)})")
       end
       """)
     end
@@ -211,7 +253,38 @@ if Code.ensure_loaded?(Igniter) do
       On boot (in dev) a sample job is enqueued and #{inspect(worker)} runs it
       offline, logging via telemetry. To call claude for real, delete the
       `query_fun` option in #{inspect(worker)}.
+
+      Before running a fleet unattended, set up the fleet rails (see the
+      "Agent worker patterns" guide):
+
+        * add {:forcola, "~> 0.3"} and `config :claude_wrapper, runner:
+          ClaudeWrapper.Runner.Forcola` so a timed-out/cancelled run is killed,
+          not orphaned;
+        * add {Oban.Plugins.Lifeline, rescue_after: <above your args timeout>}
+          to the Oban `plugins:` so jobs orphaned by a deploy are rescued;
+        * keep `max_attempts` low (retries are paid) and raise
+          `shutdown_grace_period` above your worst-case run.
       """
+    end
+  end
+else
+  defmodule Mix.Tasks.ObanClaude.Install do
+    @shortdoc "Scaffold a runnable SQLite-backed oban_claude setup (requires Igniter)."
+    @moduledoc @shortdoc
+
+    use Mix.Task
+
+    @impl Mix.Task
+    def run(_argv) do
+      Mix.shell().error("""
+      mix oban_claude.install requires Igniter, which is not available.
+
+      Add it to your deps and re-run:
+
+          {:igniter, "~> 0.6", only: [:dev, :test]}
+      """)
+
+      exit({:shutdown, 1})
     end
   end
 end
