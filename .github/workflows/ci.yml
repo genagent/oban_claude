@@ -51,6 +51,17 @@ jobs:
       # makes no API calls and needs no claude binary.
       - run: mix test
       - run: mix dialyzer
+      # Run the fast, offline examples so a drift in the public API (or in
+      # claude_wrapper's contract) breaks CI, not a user's first `mix run`. These
+      # three self-terminate in seconds with claude stubbed. Excluded:
+      # scheduled_routine.exs (waits ~70s for a Cron tick), triage_issues.exs
+      # (shells to `gh`), console.exs (interactive/paid) -- all still parsed by
+      # `mix format --check-formatted` above.
+      - run: |
+          for ex in playground propose_dispose event_driven; do
+            echo "== examples/$ex.exs =="
+            mix run "examples/$ex.exs"
+          done
       # Packaging smoke test: build the Hex tarball (exercises the package/0
       # files: list) so tarball contents are validated in CI, not first at publish.
       - run: mix hex.build

@@ -105,7 +105,10 @@ fire.("\"issue-99 opened\"", prompt: "Triage issue #99")
 # ---------------------------------------------------------------------------
 count = fn state ->
   EventRepo.one(
-    from(j in "oban_jobs", where: j.worker == "EventWorker" and j.state == ^state, select: count(j.id))
+    from(j in "oban_jobs",
+      where: j.worker == "EventWorker" and j.state == ^state,
+      select: count(j.id)
+    )
   )
 end
 
@@ -115,7 +118,10 @@ Enum.reduce_while(1..20, nil, fn _, _ ->
   Process.sleep(300)
   done = count.("completed")
   IO.puts("  completed: #{done}")
-  if done >= 2 and count.("available") == 0 and count.("executing") == 0, do: {:halt, done}, else: {:cont, done}
+
+  if done >= 2 and count.("available") == 0 and count.("executing") == 0,
+    do: {:halt, done},
+    else: {:cont, done}
 end)
 
 IO.puts("""
