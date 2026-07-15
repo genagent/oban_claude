@@ -23,7 +23,7 @@ call that returns a typed `%ClaudeWrapper.Result{}` / `%ClaudeWrapper.Error{}`.
 def deps do
   [
     {:oban, "~> 2.23"},
-    {:oban_claude, "~> 0.1"}
+    {:oban_claude, "~> 0.2"}
   ]
 end
 ```
@@ -33,11 +33,11 @@ end
 - **Elixir `~> 1.20`** on **OTP 29**.
 - The **`claude` CLI, installed and authenticated** -- `oban_claude` shells out
   to it via [`claude_wrapper`](https://hex.pm/packages/claude_wrapper) (pinned to
-  the `0.13.x` line). Run `claude doctor` before your first real job; without a
+  the `0.14.x` line). Run `claude doctor` before your first real job; without a
   working CLI, runs dead-letter as `{:cancel, :binary_not_found}` or
   `{:cancel, :auth}`.
 
-## Use
+## Quick start
 
 ```elixir
 defmodule MyApp.ClaudeJob do
@@ -411,6 +411,36 @@ assert {:ok, _} = ObanClaude.run(%{"prompt" => "x"}, query_fun: respond("done"))
 assert {{:cancel, :auth}, _} = ObanClaude.run(%{"prompt" => "x"}, query_fun: fail(:auth))
 ```
 
+## Telemetry
+
+Every `run/2` emits a `:telemetry` span, so one handler observes the whole
+fleet's spend and outcomes without touching the workers:
+
+| Event | When | Cost measurement |
+|---|---|---|
+| `[:oban_claude, :run, :stop]` | a `%Result{}` came back (including `is_error: true`) | `:cost_usd` from the result |
+| `[:oban_claude, :run, :exception]` | the query returned `{:error, _}` (typed or off-contract) | `:cost_usd` off a rail-stop reason (`0.0` otherwise) |
+
+Both carry `:duration`, the `:args` map, and a slim `:job` map
+(`%{id, queue, worker, attempt, max_attempts, meta}`, or `nil` outside a job) —
+so `job.meta` is your identity/attribution channel. **Summing `:cost_usd` across
+*both* events gives a complete spend total** (a budget rail-stop is an
+`:exception` that still spent money). See `ObanClaude` for the full metadata
+contract — and note `:args` / `:result` / `:error` can embed prompts and raw CLI
+output, so redact before shipping to a log aggregator.
+
+## Module reference
+
+| Module | Description |
+|---|---|
+| `ObanClaude` | The engine (`run/2`) + result readers (`outcome/1`, `structured/1`, `session_id/1`, `cost_usd/1`) |
+| `ObanClaude.Worker` | `use ObanClaude.Worker` — the worker macro; `handle_result/2` (success) and `handle_error/3` (every non-`:ok` verdict) overrides |
+| `ObanClaude.Args` | Validated args builder — `new/1` (prompt-required) / `defaults/1` (prompt-optional, for worker `:args`) |
+| `ObanClaude.Outcome` | The default, overridable outcome → Oban-return classifier (`classify/1`) |
+| `ObanClaude.Testing` | Build `:query_fun` stubs without hard-coding `claude_wrapper` structs |
+| `Mix.Tasks.ObanClaude` | The `mix oban_claude run/doctor/args` command tree |
+| `Mix.Tasks.ObanClaude.Install` | Igniter installer that scaffolds a SQLite-backed setup |
+
 ## What it does NOT do
 
 No state, no daemon, no "sink". It runs the agent and returns the
@@ -421,3 +451,7 @@ caller's job (`handle_result/2` + the `[:oban_claude, :run, :stop]` telemetry).
 
 See [SPEC.md](https://github.com/genagent/oban_claude/blob/main/SPEC.md) for the
 design and the build-out checklist.
+
+## License
+
+MIT. See the `LICENSE` file in the source repo for the full text.
