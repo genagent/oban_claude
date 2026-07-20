@@ -518,6 +518,27 @@ defmodule ObanClaude.AgentTest do
     end
   end
 
+  describe "history cap" do
+    test "history retains only the newest max_history entries" do
+      id = start_agent!(max_history: 3)
+
+      for n <- 1..3 do
+        :processing = Agent.submit_prompt(id, "turn #{n}")
+        :ok = Agent.job_finished(id, {:ok, result("done #{n}")})
+        {:ok, :idle} = Agent.await(id, :idle, 1_000)
+      end
+
+      # 3 turns = 6 entries recorded; only the newest 3 survive
+      assert {:ok, history} = Agent.history(id)
+
+      assert history == [
+               {:result, "done 2"},
+               {:prompt, "turn 3"},
+               {:result, "done 3"}
+             ]
+    end
+  end
+
   describe "invalid actions" do
     test "an action invalid for the current state names the state in the error" do
       id = start_agent!()

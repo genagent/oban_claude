@@ -49,6 +49,8 @@ defmodule ObanClaude.Agent.Instance do
       `ObanClaude.Agent.Job`
     * `:oban` -- the Oban instance name to insert into; default `Oban`
     * `:job_timeout` -- the `:running` watchdog in milliseconds; default 60000
+    * `:max_history` -- cap on retained history entries (newest win); default
+      500, so an always-on agent's event log cannot grow without bound
     * `:enqueue_fun` -- a 2-arity `(args, meta) -> {:ok, term} | {:error, term}`
       override of the enqueue itself, for tests (no Oban, no DB)
   """
@@ -67,7 +69,10 @@ defmodule ObanClaude.Agent.Instance do
     worker: ObanClaude.Agent.Job,
     oban: Oban,
     enqueue_fun: nil,
-    job_timeout: 60_000
+    job_timeout: 60_000,
+    # History is an in-process event log; an always-on agent must not grow it
+    # without bound. Newest entries win; the cap is per-entry, not per-turn.
+    max_history: 500
   }
 
   def child_spec({agent_id, config}) do
@@ -405,7 +410,9 @@ defmodule ObanClaude.Agent.Instance do
 
   defp action_id, do: "act_" <> Integer.to_string(System.unique_integer([:positive]))
 
-  defp record(data, entry), do: %{data | history: [entry | data.history]}
+  defp record(data, entry) do
+    %{data | history: Enum.take([entry | data.history], data.config.max_history)}
+  end
 
   defp sync_transition(from, to, data) do
     Registry.update_value(@registry, data.id, fn _old -> status_value(to, data) end)
