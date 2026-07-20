@@ -1,7 +1,13 @@
 defmodule ObanClaude.Agent do
   @moduledoc """
-  A facade over long-lived agent processes whose turns run as Oban jobs
-  (spike, see PR #115: exploratory API, may change or be extracted).
+  A facade over long-lived agent processes whose turns run as Oban jobs.
+
+  > #### Experimental {: .warning}
+  >
+  > The agent layer is the stateful floor above the stateless `ObanClaude`
+  > seam. It is opt-in (nothing runs unless `ObanClaude.Agent.Supervisor` is
+  > in your tree) and experimental: the API may change, and the layer may
+  > move to a sibling package.
 
   One agent is one `ObanClaude.Agent.Instance` (`:gen_statem`) registered
   under a caller-chosen id. A prompt does not block on claude: it enqueues an

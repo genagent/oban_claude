@@ -1,7 +1,7 @@
 defmodule ObanClaude.Agent.Instance do
   @moduledoc """
   One agent as one `:gen_statem` process, its asynchronous turns run as Oban
-  jobs (spike, see PR #115).
+  jobs. Part of the experimental agent layer (see `ObanClaude.Agent`).
 
   The process never blocks on claude: a prompt enqueues an `ObanClaude.Worker`
   job and the machine parks in `:running` until the worker's callbacks route
