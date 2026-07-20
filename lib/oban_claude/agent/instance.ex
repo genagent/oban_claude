@@ -11,7 +11,9 @@ defmodule ObanClaude.Agent.Instance do
     * `:idle` -- ready for a prompt
     * `:running` -- an Oban job is in flight; further prompts are `:postpone`d
       and a `:state_timeout` watchdog guards against a turn that never reports
-      back
+      back. A retryable failed attempt (`ObanClaude.Agent.job_retrying/2`)
+      keeps the machine here and re-arms the watchdog, so `:job_timeout` should
+      exceed one attempt's backoff plus its execution
     * `:waiting_for_user` -- the last turn asked a question (structured-output
       directive `"ask_user"`); the next prompt is treated as the answer and
       resumes the claude session
@@ -172,6 +174,12 @@ defmodule ObanClaude.Agent.Instance do
     {:keep_state, absorb(data, payload)}
   end
 
+  # A cast prompt has no caller to refuse, so lockdown drops it -- recorded, so
+  # the drop is visible in history rather than silent.
+  defp process_event(:paused, :cast, {:user_prompt, text}, data) do
+    {:keep_state, record(data, {:dropped_prompt, text})}
+  end
+
   defp process_event(:paused, {:call, from}, _request, _data) do
     {:keep_state_and_data, [{:reply, from, {:error, :paused}}]}
   end
@@ -184,6 +192,10 @@ defmodule ObanClaude.Agent.Instance do
     start_turn(from, text, data)
   end
 
+  defp process_event(:idle, :cast, {:user_prompt, text}, data) do
+    start_turn(nil, text, data)
+  end
+
   # A turn that outlived its watchdog: keep its payload, stay idle.
   defp process_event(:idle, :cast, {:job_finished, payload}, data) do
     {:keep_state, absorb(data, payload)}
@@ -193,12 +205,22 @@ defmodule ObanClaude.Agent.Instance do
   # :running
   # ---------------------------------------------------------------------------
 
-  defp process_event(:running, {:call, _from}, {:user_prompt, _text}, _data) do
+  # Both the call and the cast form postpone: a called prompt blocks its
+  # caller until the turn finishes, a cast one just queues.
+  defp process_event(:running, _type, {:user_prompt, _text}, _data) do
     {:keep_state_and_data, [:postpone]}
   end
 
   defp process_event(:running, :cast, {:job_finished, payload}, data) do
     finish_turn(data, payload)
+  end
+
+  # A retryable attempt failed and Oban will re-run the job: the turn is still
+  # logically in flight, so stay :running, log it, and re-arm the watchdog to
+  # cover the retry's backoff plus its execution.
+  defp process_event(:running, :cast, {:job_retrying, retry}, data) do
+    {:keep_state, record(data, {:retrying, retry}),
+     [{:state_timeout, data.config.job_timeout, :job_watchdog}]}
   end
 
   defp process_event(:running, :state_timeout, :job_watchdog, data) do
@@ -214,14 +236,18 @@ defmodule ObanClaude.Agent.Instance do
     start_turn(from, answer, %{data | pending_question: nil})
   end
 
+  defp process_event(:waiting_for_user, :cast, {:user_prompt, answer}, data) do
+    start_turn(nil, answer, %{data | pending_question: nil})
+  end
+
   # ---------------------------------------------------------------------------
   # :awaiting_permission
   # ---------------------------------------------------------------------------
 
   # Prompts queue behind the gate rather than erroring (deviation from the
   # original matrix, from live use): the operator can line up the next thing
-  # while deciding on the approval.
-  defp process_event(:awaiting_permission, {:call, _from}, {:user_prompt, _text}, _data) do
+  # while deciding on the approval. Call and cast forms alike.
+  defp process_event(:awaiting_permission, _type, {:user_prompt, _text}, _data) do
     {:keep_state_and_data, [:postpone]}
   end
 
@@ -265,7 +291,8 @@ defmodule ObanClaude.Agent.Instance do
   # Enqueue one claude turn and park in :running under the watchdog. The args
   # are the config defaults, any per-turn extras (approve continuations carry
   # :approved_args), the prompt, and (from the second turn on) the resume
-  # handle of the agent's claude session.
+  # handle of the agent's claude session. `from` is nil on the cast path
+  # (no caller to reply to).
   defp start_turn(from, prompt, data, extra_args \\ %{}) do
     args =
       data.config.args
@@ -278,13 +305,16 @@ defmodule ObanClaude.Agent.Instance do
         watchdog = {:state_timeout, data.config.job_timeout, :job_watchdog}
 
         {:next_state, :running, record(data, {:prompt, prompt}),
-         [{:reply, from, :processing}, watchdog]}
+         reply(from, :processing) ++ [watchdog]}
 
       {:error, reason} ->
         {:next_state, :idle, record(data, {:enqueue_failed, reason}),
-         [{:reply, from, {:error, {:enqueue_failed, reason}}}]}
+         reply(from, {:error, {:enqueue_failed, reason}})}
     end
   end
+
+  defp reply(nil, _message), do: []
+  defp reply(from, message), do: [{:reply, from, message}]
 
   # Route on the finished turn's structured-output directive.
   defp finish_turn(data, {:ok, %Result{} = result} = payload) do

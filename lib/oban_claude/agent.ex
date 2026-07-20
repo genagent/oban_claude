@@ -82,7 +82,9 @@ defmodule ObanClaude.Agent do
       {:ok, {:awaiting_permission, %{id: id, description: d}}} = status("live")
       {:ok, {:waiting_for_user, question}} = status("live")
 
-  An unknown or stopped agent reads as `{:ok, :offline}`.
+  An unknown or stopped agent reads as `{:ok, :offline}`. Registry cleanup
+  after a process death is asynchronous, so `:offline` after `stop_agent/1`
+  is eventually-consistent -- `await(id, :offline)` if you need to block on it.
   """
   @spec status(agent_id()) :: {:ok, status()}
   def status(agent_id) do
@@ -125,6 +127,24 @@ defmodule ObanClaude.Agent do
   """
   @spec submit_prompt(agent_id(), String.t()) :: :processing | {:error, term()}
   def submit_prompt(agent_id, prompt), do: call(agent_id, {:user_prompt, prompt})
+
+  @doc """
+  The fire-and-forget form of `submit_prompt/2`: never blocks the caller.
+
+  Returns `:ok` as soon as the cast is sent -- there is no `:processing`
+  acknowledgment and no error reply on a failed enqueue (that lands in
+  `history/1` as `{:enqueue_failed, reason}`). State handling matches
+  `submit_prompt/2` -- queued in `:running` / `:awaiting_permission`, the
+  answer in `:waiting_for_user` -- except `:paused`, where the prompt is
+  dropped (recorded as `{:dropped_prompt, text}`) since lockdown has no caller
+  to refuse. Use this from callers that must not block on a busy agent (a
+  LiveView event handler); use `submit_prompt/2` when you want backpressure
+  and the enqueue acknowledgment.
+  """
+  @spec cast_prompt(agent_id(), String.t()) :: :ok | {:error, :agent_not_running}
+  def cast_prompt(agent_id, prompt) do
+    with_agent(agent_id, &:gen_statem.cast(&1, {:user_prompt, prompt}))
+  end
 
   @doc """
   Approve the pending action by id (read it off `status/1` or `await/3`).
@@ -182,6 +202,22 @@ defmodule ObanClaude.Agent do
           :ok | {:error, :agent_not_running}
   def job_finished(agent_id, payload) do
     with_agent(agent_id, &:gen_statem.cast(&1, {:job_finished, payload}))
+  end
+
+  @doc """
+  The retry half of the return path: report a failed-but-retryable attempt.
+
+  `ObanClaude.Agent.Job`'s error callback calls this when Oban will re-run
+  the job (an `{:error, _}` with attempts remaining, or a `{:snooze, _}`). The
+  machine stays in `:running` -- the logical turn is still in flight -- records
+  `{:retrying, retry}` in history, and re-arms the `:job_timeout` watchdog to
+  cover the retry's backoff plus execution. `retry` is
+  `%{attempt:, max_attempts:, verdict:}`. Fire-and-forget, like
+  `job_finished/2`.
+  """
+  @spec job_retrying(agent_id(), map()) :: :ok | {:error, :agent_not_running}
+  def job_retrying(agent_id, retry) do
+    with_agent(agent_id, &:gen_statem.cast(&1, {:job_retrying, retry}))
   end
 
   defp poll_await(agent_id, states, deadline) do

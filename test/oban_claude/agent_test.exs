@@ -53,7 +53,9 @@ defmodule ObanClaude.AgentTest do
     test "a stopped agent reads :offline again" do
       id = start_agent!()
       assert :ok = Agent.stop_agent(id)
-      assert {:ok, :offline} = Agent.status(id)
+      # Registry cleanup after a process death is asynchronous (monitor-based),
+      # so :offline is eventually-consistent -- await it rather than assert it.
+      assert {:ok, :offline} = Agent.await(id, :offline, 1_000)
     end
 
     test "atom keys in :args fail fast at start" do
@@ -138,6 +140,126 @@ defmodule ObanClaude.AgentTest do
 
       :processing = Agent.submit_prompt(id, "pick it back up")
       assert_receive {:enqueued, %{"prompt" => "pick it back up", "resume" => "sess-9"}, _meta}
+    end
+  end
+
+  describe "cast_prompt/2" do
+    test "fires a turn without blocking and without a reply" do
+      id = start_agent!()
+      assert :ok = Agent.cast_prompt(id, "async go")
+      assert {:ok, :running} = Agent.await(id, :running, 1_000)
+      assert_receive {:enqueued, %{"prompt" => "async go"}, %{"agent_id" => ^id}}
+    end
+
+    test "queues behind an in-flight turn like the call form" do
+      id = start_agent!()
+      :processing = Agent.submit_prompt(id, "first")
+      assert_receive {:enqueued, %{"prompt" => "first"}, _meta}
+
+      assert :ok = Agent.cast_prompt(id, "second")
+      refute_receive {:enqueued, %{"prompt" => "second"}, _meta}, 100
+
+      :ok = Agent.job_finished(id, {:ok, result("done")})
+      assert_receive {:enqueued, %{"prompt" => "second"}, _meta}
+      assert {:ok, :running} = Agent.status(id)
+    end
+
+    test "answers the pending question in :waiting_for_user" do
+      id = start_agent!()
+      :processing = Agent.submit_prompt(id, "deploy")
+      assert_receive {:enqueued, _args, _meta}
+
+      turn =
+        structured_result(%{"directive" => "ask_user", "question" => "env?"}, session_id: "s")
+
+      :ok = Agent.job_finished(id, {:ok, turn})
+      {:ok, {:waiting_for_user, "env?"}} = Agent.await(id, :waiting_for_user, 1_000)
+
+      assert :ok = Agent.cast_prompt(id, "staging")
+      assert_receive {:enqueued, %{"prompt" => "staging", "resume" => "s"}, _meta}
+    end
+
+    test "is dropped and recorded in :paused" do
+      id = start_agent!()
+      :ok = Agent.emergency_pause(id)
+      {:ok, :paused} = Agent.await(id, :paused, 1_000)
+
+      assert :ok = Agent.cast_prompt(id, "into the void")
+      settle(id)
+      assert {:ok, :paused} = Agent.status(id)
+
+      :resumed = Agent.resume_agent(id)
+      refute_receive {:enqueued, _args, _meta}, 50
+      assert {:ok, history} = Agent.history(id)
+      assert {:dropped_prompt, "into the void"} in history
+    end
+  end
+
+  describe "retry-aware routing" do
+    test "a retryable attempt keeps the machine :running and records the retry" do
+      id = start_agent!()
+      :processing = Agent.submit_prompt(id, "turn")
+
+      job = %Oban.Job{attempt: 1, max_attempts: 3, meta: %{"agent_id" => id}}
+      verdict = {:error, :timeout}
+      assert ^verdict = ObanClaude.Agent.Job.handle_error(verdict, error(:timeout), job)
+      settle(id)
+
+      assert {:ok, :running} = Agent.status(id)
+      assert {:ok, history} = Agent.history(id)
+
+      assert {:retrying, %{attempt: 1, max_attempts: 3, verdict: ^verdict}} =
+               Enum.find(history, &match?({:retrying, _}, &1))
+    end
+
+    test "a snooze is never terminal" do
+      id = start_agent!()
+      :processing = Agent.submit_prompt(id, "turn")
+
+      job = %Oban.Job{attempt: 1, max_attempts: 1, meta: %{"agent_id" => id}}
+      ObanClaude.Agent.Job.handle_error({:snooze, 30}, result("parked"), job)
+      settle(id)
+
+      assert {:ok, :running} = Agent.status(id)
+    end
+
+    test "the final attempt's failure is terminal" do
+      id = start_agent!()
+      :processing = Agent.submit_prompt(id, "turn")
+
+      job = %Oban.Job{attempt: 3, max_attempts: 3, meta: %{"agent_id" => id}}
+      ObanClaude.Agent.Job.handle_error({:error, :timeout}, error(:timeout), job)
+
+      assert {:ok, :idle} = Agent.await(id, :idle, 1_000)
+      assert {:ok, history} = Agent.history(id)
+      assert {:job_error, {:error, :timeout}} in history
+    end
+
+    test "a cancel verdict is terminal regardless of attempts remaining" do
+      id = start_agent!()
+      :processing = Agent.submit_prompt(id, "turn")
+
+      job = %Oban.Job{attempt: 1, max_attempts: 3, meta: %{"agent_id" => id}}
+      ObanClaude.Agent.Job.handle_error({:cancel, :auth}, error(:auth), job)
+
+      assert {:ok, :idle} = Agent.await(id, :idle, 1_000)
+    end
+
+    test "a retry re-arms the watchdog" do
+      id = start_agent!(job_timeout: 300)
+      :processing = Agent.submit_prompt(id, "turn")
+
+      Process.sleep(200)
+      :ok = Agent.job_retrying(id, %{attempt: 1, max_attempts: 3, verdict: {:error, :timeout}})
+
+      # past the original 300ms deadline but inside the re-armed one
+      Process.sleep(200)
+      assert {:ok, :running} = Agent.status(id)
+
+      # the re-armed watchdog still fires if the retry never reports back
+      assert {:ok, :idle} = Agent.await(id, :idle, 1_000)
+      assert {:ok, history} = Agent.history(id)
+      assert :watchdog_timeout in history
     end
   end
 
