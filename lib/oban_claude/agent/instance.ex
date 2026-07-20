@@ -16,26 +16,33 @@ defmodule ObanClaude.Agent.Instance do
       directive `"ask_user"`); the next prompt is treated as the answer and
       resumes the claude session
     * `:awaiting_permission` -- the last turn requested approval (directive
-      `"request_permission"`); `approve` resumes the session with the action,
-      `reject` records the denial and returns to `:idle`
+      `"request_permission"`); `approve` resumes the session with the action
+      (under `:approved_args`, see below), `reject` records the denial and
+      returns to `:idle`, and prompts are `:postpone`d until the gate clears
     * `:paused` -- lockdown via `:emergency_pause`; every call is refused until
       an explicit `resume`
 
-  Every state change synchronizes the registry value (so
-  `ObanClaude.Agent.get_status/1` reads status without messaging the process)
-  and emits `[:oban_claude, :agent, :transition]` telemetry with
-  `%{agent_id, from, to}` metadata.
+  Every state change atomically synchronizes the registry value -- the state
+  atom, paired with the pending action or question in the gated states -- so
+  `ObanClaude.Agent.status/1` reads both without messaging the process. Each
+  change also emits `[:oban_claude, :agent, :transition]` telemetry with
+  `%{agent_id, from, to}` metadata (state atoms).
 
   The claude session id is read off each turn's payload (including rail-stop
   errors) and threaded into the next turn as `resume`, so one agent is one
-  persistent claude conversation.
+  persistent claude conversation. Turn count and accumulated cost ride in the
+  data (see `ObanClaude.Agent.info/1`).
 
   ## Config
 
   `start_agent/2` takes a keyword list or map:
 
     * `:args` -- default claude args merged under every turn's prompt (build
-      with `ObanClaude.Args.defaults/1`); default `%{}`
+      with `ObanClaude.Args.defaults/1`; string keys); default `%{}`
+    * `:approved_args` -- claude args merged over `:args` for approve
+      continuations ONLY, so conversational approval actually unlocks
+      something -- e.g. `%{"permission_mode" => "accept_edits"}` or an
+      `allowed_tools` grant. Normal turns never carry these. Default `%{}`.
     * `:worker` -- the Oban worker module for turns; default
       `ObanClaude.Agent.Job`
     * `:oban` -- the Oban instance name to insert into; default `Oban`
@@ -54,6 +61,7 @@ defmodule ObanClaude.Agent.Instance do
 
   @defaults %{
     args: %{},
+    approved_args: %{},
     worker: ObanClaude.Agent.Job,
     oban: Oban,
     enqueue_fun: nil,
@@ -84,11 +92,17 @@ defmodule ObanClaude.Agent.Instance do
 
   @impl :gen_statem
   def init({agent_id, config}) do
+    config = Map.merge(@defaults, Map.new(config))
+    validate_string_keys!(:args, config.args)
+    validate_string_keys!(:approved_args, config.approved_args)
+
     data = %{
       id: agent_id,
-      config: Map.merge(@defaults, Map.new(config)),
+      config: config,
       history: [],
       session_id: nil,
+      turns: 0,
+      cost_usd: 0.0,
       pending_action: nil,
       pending_question: nil
     }
@@ -123,13 +137,25 @@ defmodule ObanClaude.Agent.Instance do
     {:keep_state_and_data, [{:reply, from, {:ok, Enum.reverse(data.history)}}]}
   end
 
-  defp process_event(_state, {:call, from}, :pending, data) do
-    pending = %{action: data.pending_action, question: data.pending_question}
-    {:keep_state_and_data, [{:reply, from, {:ok, pending}}]}
+  defp process_event(state, {:call, from}, :info, data) do
+    info = %{
+      id: data.id,
+      state: state,
+      session_id: data.session_id,
+      turns: data.turns,
+      cost_usd: data.cost_usd,
+      pending_action: data.pending_action,
+      pending_question: data.pending_question
+    }
+
+    {:keep_state_and_data, [{:reply, from, {:ok, info}}]}
   end
 
+  # "Drops active scopes": a pending action or question does not survive the
+  # lockdown; after resume the operator starts from a clean :idle.
   defp process_event(state, :cast, :emergency_pause, data) when state != :paused do
-    {:next_state, :paused, record(data, {:paused_from, state})}
+    data = %{record(data, {:paused_from, state}) | pending_action: nil, pending_question: nil}
+    {:next_state, :paused, data}
   end
 
   # ---------------------------------------------------------------------------
@@ -141,7 +167,7 @@ defmodule ObanClaude.Agent.Instance do
   end
 
   # A turn that was in flight when the pause hit: absorb the payload (history,
-  # session id) but stay locked and ignore its directives.
+  # session id, spend) but stay locked and ignore its directives.
   defp process_event(:paused, :cast, {:job_finished, payload}, data) do
     {:keep_state, absorb(data, payload)}
   end
@@ -192,11 +218,18 @@ defmodule ObanClaude.Agent.Instance do
   # :awaiting_permission
   # ---------------------------------------------------------------------------
 
+  # Prompts queue behind the gate rather than erroring (deviation from the
+  # original matrix, from live use): the operator can line up the next thing
+  # while deciding on the approval.
+  defp process_event(:awaiting_permission, {:call, _from}, {:user_prompt, _text}, _data) do
+    {:keep_state_and_data, [:postpone]}
+  end
+
   defp process_event(:awaiting_permission, {:call, from}, {:approve_action, id}, data) do
     case data.pending_action do
       %{id: ^id, description: description} ->
         prompt = "Approved: #{description}. Proceed."
-        start_turn(from, prompt, %{data | pending_action: nil})
+        start_turn(from, prompt, %{data | pending_action: nil}, data.config.approved_args)
 
       _ ->
         {:keep_state_and_data, [{:reply, from, {:error, :unknown_action}}]}
@@ -230,11 +263,13 @@ defmodule ObanClaude.Agent.Instance do
   # ---------------------------------------------------------------------------
 
   # Enqueue one claude turn and park in :running under the watchdog. The args
-  # are the config defaults, the prompt, and (from the second turn on) the
-  # resume handle of the agent's claude session.
-  defp start_turn(from, prompt, data) do
+  # are the config defaults, any per-turn extras (approve continuations carry
+  # :approved_args), the prompt, and (from the second turn on) the resume
+  # handle of the agent's claude session.
+  defp start_turn(from, prompt, data, extra_args \\ %{}) do
     args =
       data.config.args
+      |> Map.merge(extra_args)
       |> Map.put("prompt", prompt)
       |> maybe_resume(data.session_id)
 
@@ -272,17 +307,29 @@ defmodule ObanClaude.Agent.Instance do
     {:next_state, :idle, absorb(data, failure)}
   end
 
-  # Fold a turn's payload into the data: a history entry, plus the claude
-  # session id when the payload carries one (a rail-stop %Error{} does too).
+  # Fold a turn's payload into the data: a history entry (the decoded
+  # structured output when the turn produced one, the plain text otherwise),
+  # the turn/spend counters, and the claude session id when the payload
+  # carries one (a rail-stop %Error{} does too).
   defp absorb(data, {:ok, %Result{} = result}) do
-    data = record(data, {:result, result.result})
-    %{data | session_id: result.session_id || data.session_id}
+    data
+    |> record({:result, ObanClaude.structured(result) || result.result})
+    |> count_turn(result.cost_usd)
+    |> keep_session(result.session_id)
   end
 
   defp absorb(data, {:error, verdict, payload}) do
-    data = record(data, {:job_error, verdict})
-    %{data | session_id: ObanClaude.session_id(payload) || data.session_id}
+    data
+    |> record({:job_error, verdict})
+    |> count_turn(ObanClaude.cost_usd(payload))
+    |> keep_session(ObanClaude.session_id(payload))
   end
+
+  defp count_turn(data, cost) do
+    %{data | turns: data.turns + 1, cost_usd: data.cost_usd + (cost || 0.0)}
+  end
+
+  defp keep_session(data, session_id), do: %{data | session_id: session_id || data.session_id}
 
   defp directive(result) do
     case ObanClaude.structured(result) do
@@ -315,12 +362,33 @@ defmodule ObanClaude.Agent.Instance do
   defp record(data, entry), do: %{data | history: [entry | data.history]}
 
   defp sync_transition(from, to, data) do
-    Registry.update_value(@registry, data.id, fn _old -> to end)
+    Registry.update_value(@registry, data.id, fn _old -> status_value(to, data) end)
 
     :telemetry.execute(
       [:oban_claude, :agent, :transition],
       %{system_time: System.system_time()},
       %{agent_id: data.id, from: from, to: to}
     )
+  end
+
+  # The registry value `ObanClaude.Agent.status/1` serves: the gated states
+  # carry their payload so one atomic, messageless read answers both "where is
+  # it" and "what is it waiting on" -- no torn status-then-pending reads.
+  defp status_value(:awaiting_permission, data), do: {:awaiting_permission, data.pending_action}
+  defp status_value(:waiting_for_user, data), do: {:waiting_for_user, data.pending_question}
+  defp status_value(state, _data), do: state
+
+  # The same silent-drop trap ObanClaude.Worker guards at compile time (#75):
+  # atom keys would vanish in the string-keyed merge with each job's args.
+  defp validate_string_keys!(key, args) when is_map(args) do
+    case Enum.reject(Map.keys(args), &is_binary/1) do
+      [] ->
+        :ok
+
+      bad ->
+        raise ArgumentError,
+              "ObanClaude.Agent config `#{key}` keys must be strings, got #{inspect(bad)}. " <>
+                "Build the map with ObanClaude.Args.defaults/1 (atom keys in, string map out)."
+    end
   end
 end

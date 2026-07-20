@@ -37,11 +37,11 @@ defmodule ObanClaude.AgentTest do
   describe "registry status reads" do
     test "a started agent reads :idle without messaging the process" do
       id = start_agent!()
-      assert {:ok, :idle} = Agent.get_status(id)
+      assert {:ok, :idle} = Agent.status(id)
     end
 
     test "an unknown agent reads :offline" do
-      assert {:ok, :offline} = Agent.get_status("never-started")
+      assert {:ok, :offline} = Agent.status("never-started")
     end
 
     test "start_agent is idempotent for an already-running id" do
@@ -53,7 +53,14 @@ defmodule ObanClaude.AgentTest do
     test "a stopped agent reads :offline again" do
       id = start_agent!()
       assert :ok = Agent.stop_agent(id)
-      assert {:ok, :offline} = Agent.get_status(id)
+      assert {:ok, :offline} = Agent.status(id)
+    end
+
+    test "atom keys in :args fail fast at start" do
+      assert {:error, %ArgumentError{message: message}} =
+               Agent.start_agent("bad-args", args: %{model: "sonnet"})
+
+      assert message =~ "keys must be strings"
     end
   end
 
@@ -61,14 +68,20 @@ defmodule ObanClaude.AgentTest do
     test "submit_prompt enqueues a turn tagged with the agent id and replies :processing" do
       id = start_agent!()
       assert :processing = Agent.submit_prompt(id, "run deep code audit step")
-      assert {:ok, :running} = Agent.get_status(id)
+      assert {:ok, :running} = Agent.status(id)
       assert_receive {:enqueued, %{"prompt" => "run deep code audit step"}, %{"agent_id" => ^id}}
     end
 
-    test "config default args ride under the prompt" do
-      id = start_agent!(args: %{"model" => "sonnet"})
+    test "config default args ride under the prompt; approved_args do not" do
+      id =
+        start_agent!(
+          args: %{"model" => "sonnet"},
+          approved_args: %{"permission_mode" => "accept_edits"}
+        )
+
       :processing = Agent.submit_prompt(id, "go")
-      assert_receive {:enqueued, %{"prompt" => "go", "model" => "sonnet"}, _meta}
+      assert_receive {:enqueued, %{"prompt" => "go", "model" => "sonnet"} = args, _meta}
+      refute Map.has_key?(args, "permission_mode")
     end
 
     test "an enqueue failure stays :idle and surfaces the reason" do
@@ -76,7 +89,7 @@ defmodule ObanClaude.AgentTest do
       {:ok, _} = Agent.start_agent(id, enqueue_fun: fn _args, _meta -> {:error, :db_down} end)
 
       assert {:error, {:enqueue_failed, :db_down}} = Agent.submit_prompt(id, "go")
-      assert {:ok, :idle} = Agent.get_status(id)
+      assert {:ok, :idle} = Agent.status(id)
     end
   end
 
@@ -92,16 +105,15 @@ defmodule ObanClaude.AgentTest do
       :ok = Agent.job_finished(id, {:ok, result("done")})
       assert :processing = Task.await(caller)
       assert_receive {:enqueued, %{"prompt" => "second"}, _meta}
-      assert {:ok, :running} = Agent.get_status(id)
+      assert {:ok, :running} = Agent.status(id)
     end
 
     test "a plain result returns the agent to :idle" do
       id = start_agent!()
       :processing = Agent.submit_prompt(id, "turn")
       :ok = Agent.job_finished(id, {:ok, result("all done")})
-      settle(id)
 
-      assert {:ok, :idle} = Agent.get_status(id)
+      assert {:ok, :idle} = Agent.await(id, :idle, 1_000)
       assert {:ok, history} = Agent.history(id)
       assert {:result, "all done"} in history
     end
@@ -109,10 +121,9 @@ defmodule ObanClaude.AgentTest do
     test "the watchdog returns a hung turn to :idle" do
       id = start_agent!(job_timeout: 50)
       :processing = Agent.submit_prompt(id, "hang")
-      assert {:ok, :running} = Agent.get_status(id)
+      assert {:ok, :running} = Agent.status(id)
 
-      Process.sleep(120)
-      assert {:ok, :idle} = Agent.get_status(id)
+      assert {:ok, :idle} = Agent.await(id, :idle, 1_000)
       assert {:ok, history} = Agent.history(id)
       assert :watchdog_timeout in history
     end
@@ -123,8 +134,7 @@ defmodule ObanClaude.AgentTest do
 
       err = error(:max_budget_exceeded, reason: %{session_id: "sess-9", cost_usd: 1.5})
       :ok = Agent.job_finished(id, {:error, {:cancel, :max_budget_exceeded}, err})
-      settle(id)
-      assert {:ok, :idle} = Agent.get_status(id)
+      assert {:ok, :idle} = Agent.await(id, :idle, 1_000)
 
       :processing = Agent.submit_prompt(id, "pick it back up")
       assert_receive {:enqueued, %{"prompt" => "pick it back up", "resume" => "sess-9"}, _meta}
@@ -158,13 +168,14 @@ defmodule ObanClaude.AgentTest do
         )
 
       :ok = Agent.job_finished(id, {:ok, turn})
-      settle(id)
-      assert {:ok, :waiting_for_user} = Agent.get_status(id)
-      assert {:ok, %{question: "which environment?"}} = Agent.pending(id)
+
+      # one atomic read: the state and the question it is gated on
+      assert {:ok, {:waiting_for_user, "which environment?"}} =
+               Agent.await(id, :waiting_for_user, 1_000)
 
       assert :processing = Agent.submit_prompt(id, "staging")
       assert_receive {:enqueued, %{"prompt" => "staging", "resume" => "sess-1"}, _meta}
-      assert {:ok, :running} = Agent.get_status(id)
+      assert {:ok, :running} = Agent.status(id)
     end
   end
 
@@ -180,21 +191,34 @@ defmodule ObanClaude.AgentTest do
         )
 
       :ok = Agent.job_finished(id, {:ok, turn})
-      settle(id)
-      assert {:ok, :awaiting_permission} = Agent.get_status(id)
 
-      {:ok, %{action: %{id: action_id, description: "rewrite lib/core.ex"}}} = Agent.pending(id)
+      assert {:ok, {:awaiting_permission, %{id: action_id, description: "rewrite lib/core.ex"}}} =
+               Agent.await(id, :awaiting_permission, 1_000)
+
       action_id
     end
 
-    test "approve_action resumes the session with the approved action" do
-      id = start_agent!()
+    test "approve_action resumes the session with the approved action under approved_args" do
+      id = start_agent!(approved_args: %{"permission_mode" => "accept_edits"})
       action_id = block_on_permission!(id)
 
       assert :processing = Agent.approve_action(id, action_id)
-      assert_receive {:enqueued, %{"prompt" => prompt, "resume" => "sess-2"}, _meta}
+
+      assert_receive {:enqueued,
+                      %{
+                        "prompt" => prompt,
+                        "resume" => "sess-2",
+                        "permission_mode" => "accept_edits"
+                      }, _meta}
+
       assert prompt =~ "rewrite lib/core.ex"
-      assert {:ok, :running} = Agent.get_status(id)
+      assert {:ok, :running} = Agent.status(id)
+
+      # the elevation is per-approval: the next normal turn runs locked down
+      :ok = Agent.job_finished(id, {:ok, result("edited")})
+      :processing = Agent.submit_prompt(id, "normal turn")
+      assert_receive {:enqueued, %{"prompt" => "normal turn"} = args, _meta}
+      refute Map.has_key?(args, "permission_mode")
     end
 
     test "reject_action records the denial and returns to :idle without enqueuing" do
@@ -202,12 +226,11 @@ defmodule ObanClaude.AgentTest do
       action_id = block_on_permission!(id)
 
       assert :rejected = Agent.reject_action(id, action_id, "too risky")
-      assert {:ok, :idle} = Agent.get_status(id)
+      assert {:ok, :idle} = Agent.status(id)
       refute_receive {:enqueued, _args, _meta}, 50
 
       assert {:ok, history} = Agent.history(id)
       assert {:denied, ^action_id, "too risky"} = Enum.find(history, &match?({:denied, _, _}, &1))
-      assert {:ok, %{action: nil}} = Agent.pending(id)
     end
 
     test "a mismatched action id is refused and keeps the agent blocked" do
@@ -216,7 +239,21 @@ defmodule ObanClaude.AgentTest do
 
       assert {:error, :unknown_action} = Agent.approve_action(id, "act_bogus")
       assert {:error, :unknown_action} = Agent.reject_action(id, "act_bogus")
-      assert {:ok, :awaiting_permission} = Agent.get_status(id)
+      assert {:ok, {:awaiting_permission, _action}} = Agent.status(id)
+    end
+
+    test "a prompt during :awaiting_permission queues behind the gate" do
+      id = start_agent!()
+      action_id = block_on_permission!(id)
+
+      caller = Task.async(fn -> Agent.submit_prompt(id, "next thing") end)
+      refute_receive {:enqueued, %{"prompt" => "next thing"}, _meta}, 100
+
+      # clearing the gate releases the queued prompt
+      assert :rejected = Agent.reject_action(id, action_id, "not now")
+      assert :processing = Task.await(caller)
+      assert_receive {:enqueued, %{"prompt" => "next thing"}, _meta}
+      assert {:ok, :running} = Agent.status(id)
     end
   end
 
@@ -226,21 +263,79 @@ defmodule ObanClaude.AgentTest do
       :processing = Agent.submit_prompt(id, "work")
 
       :ok = Agent.emergency_pause(id)
-      settle(id)
-      assert {:ok, :paused} = Agent.get_status(id)
+      assert {:ok, :paused} = Agent.await(id, :paused, 1_000)
       assert {:error, :paused} = Agent.submit_prompt(id, "more work")
 
       # a turn that was in flight when the pause hit is absorbed, not acted on
       :ok = Agent.job_finished(id, {:ok, result(result: "late", session_id: "sess-late")})
       settle(id)
-      assert {:ok, :paused} = Agent.get_status(id)
+      assert {:ok, :paused} = Agent.status(id)
 
       assert :resumed = Agent.resume_agent(id)
-      assert {:ok, :idle} = Agent.get_status(id)
+      assert {:ok, :idle} = Agent.status(id)
 
       # ...but its session id was kept, so the conversation continues
       :processing = Agent.submit_prompt(id, "carry on")
       assert_receive {:enqueued, %{"prompt" => "carry on", "resume" => "sess-late"}, _meta}
+    end
+
+    test "pausing a gated agent drops the pending action (lockdown drops scopes)" do
+      id = start_agent!()
+      _action_id = block_on_permission!(id)
+
+      :ok = Agent.emergency_pause(id)
+      assert {:ok, :paused} = Agent.await(id, :paused, 1_000)
+
+      :resumed = Agent.resume_agent(id)
+      assert {:ok, %{pending_action: nil, pending_question: nil}} = Agent.info(id)
+    end
+  end
+
+  describe "await/3" do
+    test "returns the gated status with its payload once the state lands" do
+      id = start_agent!()
+      :processing = Agent.submit_prompt(id, "turn")
+
+      task = Task.async(fn -> Agent.await(id, [:idle, :awaiting_permission], 1_000) end)
+      turn = structured_result(%{"directive" => "request_permission", "action" => "do it"}, [])
+      :ok = Agent.job_finished(id, {:ok, turn})
+
+      assert {:ok, {:awaiting_permission, %{id: _, description: "do it"}}} = Task.await(task)
+    end
+
+    test "times out when the state never arrives" do
+      id = start_agent!()
+      assert {:error, :timeout} = Agent.await(id, :paused, 100)
+    end
+  end
+
+  describe "info/1 and history/1" do
+    test "info accumulates turns and spend across successes and failures" do
+      id = start_agent!()
+
+      :processing = Agent.submit_prompt(id, "one")
+      :ok = Agent.job_finished(id, {:ok, result(result: "done", cost_usd: 0.25, session_id: "s")})
+      {:ok, :idle} = Agent.await(id, :idle, 1_000)
+
+      :processing = Agent.submit_prompt(id, "two")
+      err = error(:max_budget_exceeded, reason: %{session_id: "s", cost_usd: 1.0})
+      :ok = Agent.job_finished(id, {:error, {:cancel, :max_budget_exceeded}, err})
+      {:ok, :idle} = Agent.await(id, :idle, 1_000)
+
+      assert {:ok, %{state: :idle, turns: 2, cost_usd: cost, session_id: "s"}} = Agent.info(id)
+      assert_in_delta cost, 1.25, 0.0001
+    end
+
+    test "history records the decoded structured output for --json-schema turns" do
+      id = start_agent!()
+      :processing = Agent.submit_prompt(id, "turn")
+
+      structured = %{"directive" => "none", "summary" => "did the thing"}
+      :ok = Agent.job_finished(id, {:ok, structured_result(structured, [])})
+      {:ok, :idle} = Agent.await(id, :idle, 1_000)
+
+      assert {:ok, history} = Agent.history(id)
+      assert {:result, ^structured} = Enum.find(history, &match?({:result, _}, &1))
     end
   end
 
@@ -288,14 +383,12 @@ defmodule ObanClaude.AgentTest do
 
       :processing = Agent.submit_prompt(id, "turn one")
       assert :ok = ObanClaude.Agent.Job.handle_result(result("done"), job)
-      settle(id)
-      assert {:ok, :idle} = Agent.get_status(id)
+      assert {:ok, :idle} = Agent.await(id, :idle, 1_000)
 
       :processing = Agent.submit_prompt(id, "turn two")
       verdict = {:cancel, :auth}
       assert ^verdict = ObanClaude.Agent.Job.handle_error(verdict, error(:auth), job)
-      settle(id)
-      assert {:ok, :idle} = Agent.get_status(id)
+      assert {:ok, :idle} = Agent.await(id, :idle, 1_000)
     end
 
     test "a job without an agent_id runs normally and reports to no one" do

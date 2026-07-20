@@ -6,8 +6,9 @@
 # worker's :query_fun seam.
 #
 # Walks the whole state matrix: a plain turn, a request_permission turn
-# approved by the "human", an ask_user turn answered by the "human", and the
-# emergency pause. Transitions print live off the telemetry event.
+# approved by the "human" (note the :approved_args elevation on that turn
+# only), an ask_user turn answered by the "human", and the emergency pause.
+# Transitions print live off the telemetry event.
 #
 #   mix run examples/agent_lifecycle.exs
 
@@ -55,7 +56,12 @@ defmodule LifecycleWorker do
     do: ObanClaude.Agent.Job.handle_error(verdict, payload, job)
 
   def fake_query(prompt, query_opts) do
-    IO.puts("  [claude] resume=#{inspect(query_opts[:resume])} prompt=#{inspect(prompt)}")
+    # permission_mode only appears on the approve continuation (:approved_args)
+    IO.puts(
+      "  [claude] resume=#{inspect(query_opts[:resume])} " <>
+        "permission_mode=#{inspect(query_opts[:permission_mode])} prompt=#{inspect(prompt)}"
+    )
+
     {:ok, scenario(prompt)}
   end
 
@@ -112,54 +118,50 @@ Ecto.Migrator.up(LifecycleRepo, 1, LifecycleMigration, log: false)
   nil
 )
 
-{:ok, _pid} = ObanClaude.Agent.start_agent("demo", worker: LifecycleWorker)
-
-wait_for = fn expected ->
-  Enum.reduce_while(1..200, nil, fn _tick, _acc ->
-    case ObanClaude.Agent.get_status("demo") do
-      {:ok, ^expected} ->
-        {:halt, :ok}
-
-      _other ->
-        Process.sleep(50)
-        {:cont, nil}
-    end
-  end) || raise "timed out waiting for #{inspect(expected)}"
-end
+{:ok, _pid} =
+  ObanClaude.Agent.start_agent("demo",
+    worker: LifecycleWorker,
+    approved_args: %{"permission_mode" => "accept_edits"}
+  )
 
 # ---------------------------------------------------------------------------
-# 4. Walk the matrix.
+# 4. Walk the matrix. `await/3` blocks on the registry until the state lands,
+#    returning the gated payload atomically with the state.
 # ---------------------------------------------------------------------------
 IO.puts("\n== turn 1: a plain prompt (idle -> running -> idle) ==")
 :processing = ObanClaude.Agent.submit_prompt("demo", "summarize the repo")
-wait_for.(:idle)
+{:ok, :idle} = ObanClaude.Agent.await("demo", :idle, 10_000)
 
 IO.puts("\n== turn 2: request_permission (running -> awaiting_permission) ==")
 :processing = ObanClaude.Agent.submit_prompt("demo", "plan a refactor")
-wait_for.(:awaiting_permission)
 
-{:ok, %{action: %{id: action_id, description: description}}} = ObanClaude.Agent.pending("demo")
+{:ok, {:awaiting_permission, %{id: action_id, description: description}}} =
+  ObanClaude.Agent.await("demo", :awaiting_permission, 10_000)
+
 IO.puts("  [human] pending action #{action_id}: #{description} -- approving")
 :processing = ObanClaude.Agent.approve_action("demo", action_id)
-wait_for.(:idle)
+{:ok, :idle} = ObanClaude.Agent.await("demo", :idle, 10_000)
 
 IO.puts("\n== turn 3: ask_user (running -> waiting_for_user) ==")
 :processing = ObanClaude.Agent.submit_prompt("demo", "pick a deploy env")
-wait_for.(:waiting_for_user)
 
-{:ok, %{question: question}} = ObanClaude.Agent.pending("demo")
+{:ok, {:waiting_for_user, question}} =
+  ObanClaude.Agent.await("demo", :waiting_for_user, 10_000)
+
 IO.puts("  [human] agent asks: #{question} -- answering \"staging\"")
 :processing = ObanClaude.Agent.submit_prompt("demo", "staging")
-wait_for.(:idle)
+{:ok, :idle} = ObanClaude.Agent.await("demo", :idle, 10_000)
 
 IO.puts("\n== emergency pause and resume ==")
 :ok = ObanClaude.Agent.emergency_pause("demo")
-wait_for.(:paused)
+{:ok, :paused} = ObanClaude.Agent.await("demo", :paused, 10_000)
 {:error, :paused} = ObanClaude.Agent.submit_prompt("demo", "anything")
 IO.puts("  [human] prompt while paused refused; resuming")
 :resumed = ObanClaude.Agent.resume_agent("demo")
 
+{:ok, info} = ObanClaude.Agent.info("demo")
 {:ok, history} = ObanClaude.Agent.history("demo")
-IO.puts("\nFinal status: #{inspect(ObanClaude.Agent.get_status("demo"))}")
+
+IO.puts("\nInfo: #{inspect(Map.take(info, [:state, :turns, :cost_usd, :session_id]))}")
 IO.puts("History (oldest first):")
 for entry <- history, do: IO.puts("  #{inspect(entry)}")
