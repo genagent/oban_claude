@@ -55,8 +55,9 @@ jobs:
       # claude_wrapper's contract) breaks CI, not a user's first `mix run`. These
       # self-terminate in seconds with claude stubbed. Excluded:
       # scheduled_routine.exs (waits ~70s for a Cron tick), triage_issues.exs
-      # (shells to `gh`), console.exs (interactive/paid), agent_live.exs (paid)
-      # -- all still parsed by `mix format --check-formatted` above.
+      # (shells to `gh`), console.exs (interactive/paid), agent_live.exs and
+      # agent_retry_live.exs (paid) -- all still parsed by
+      # `mix format --check-formatted` above.
       - run: |
           for ex in playground propose_dispose event_driven agent_lifecycle; do
             echo "== examples/$ex.exs =="
