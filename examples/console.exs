@@ -77,10 +77,15 @@ defmodule ObanClaude.Console do
         notifier: Oban.Notifiers.PG,
         peer: Oban.Peers.Isolated,
         plugins: [],
-        queues: [console: 1]
+        # :agents backs ObanClaude.Agent's default worker, so the console is
+        # also the barebones way to drive a live agent from iex.
+        queues: [console: 1, agents: 1]
       )
 
-    IO.puts(~s|console up. run("a prompt") to enqueue, jobs() to list.|)
+    {:ok, _} = ObanClaude.Agent.Supervisor.start_link()
+
+    IO.puts(~s|console up. run("a prompt") to enqueue, jobs() to list,|)
+    IO.puts(~s|or ObanClaude.Agent.start_agent("a1") for a live agent on the :agents queue.|)
     :ok
   end
 
