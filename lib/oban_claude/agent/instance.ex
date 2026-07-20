@@ -176,7 +176,7 @@ defmodule ObanClaude.Agent.Instance do
 
   # A cast prompt has no caller to refuse, so lockdown drops it -- recorded, so
   # the drop is visible in history rather than silent.
-  defp process_event(:paused, :cast, {:user_prompt, text}, data) do
+  defp process_event(:paused, :cast, {:user_prompt, text, _opts}, data) do
     {:keep_state, record(data, {:dropped_prompt, text})}
   end
 
@@ -188,12 +188,12 @@ defmodule ObanClaude.Agent.Instance do
   # :idle
   # ---------------------------------------------------------------------------
 
-  defp process_event(:idle, {:call, from}, {:user_prompt, text}, data) do
-    start_turn(from, text, data)
+  defp process_event(:idle, {:call, from}, {:user_prompt, text, opts}, data) do
+    start_turn(from, text, prompt_data(data, opts))
   end
 
-  defp process_event(:idle, :cast, {:user_prompt, text}, data) do
-    start_turn(nil, text, data)
+  defp process_event(:idle, :cast, {:user_prompt, text, opts}, data) do
+    start_turn(nil, text, prompt_data(data, opts))
   end
 
   # A turn that outlived its watchdog: keep its payload, stay idle.
@@ -207,7 +207,7 @@ defmodule ObanClaude.Agent.Instance do
 
   # Both the call and the cast form postpone: a called prompt blocks its
   # caller until the turn finishes, a cast one just queues.
-  defp process_event(:running, _type, {:user_prompt, _text}, _data) do
+  defp process_event(:running, _type, {:user_prompt, _text, _opts}, _data) do
     {:keep_state_and_data, [:postpone]}
   end
 
@@ -232,12 +232,21 @@ defmodule ObanClaude.Agent.Instance do
   # :waiting_for_user -- the next prompt answers the pending question
   # ---------------------------------------------------------------------------
 
-  defp process_event(:waiting_for_user, {:call, from}, {:user_prompt, answer}, data) do
-    start_turn(from, answer, %{data | pending_question: nil})
+  # A scheduled (tick-origin) prompt must never masquerade as the operator's
+  # answer to the pending question -- it queues behind the answer instead.
+  # Matching on origin here (not a status pre-check in the scheduler) makes
+  # delivery race-safe: however the prompt arrives, it cannot consume the
+  # question.
+  defp process_event(:waiting_for_user, _type, {:user_prompt, _text, %{origin: :tick}}, _data) do
+    {:keep_state_and_data, [:postpone]}
   end
 
-  defp process_event(:waiting_for_user, :cast, {:user_prompt, answer}, data) do
-    start_turn(nil, answer, %{data | pending_question: nil})
+  defp process_event(:waiting_for_user, {:call, from}, {:user_prompt, answer, opts}, data) do
+    start_turn(from, answer, prompt_data(%{data | pending_question: nil}, opts))
+  end
+
+  defp process_event(:waiting_for_user, :cast, {:user_prompt, answer, opts}, data) do
+    start_turn(nil, answer, prompt_data(%{data | pending_question: nil}, opts))
   end
 
   # ---------------------------------------------------------------------------
@@ -247,7 +256,7 @@ defmodule ObanClaude.Agent.Instance do
   # Prompts queue behind the gate rather than erroring (deviation from the
   # original matrix, from live use): the operator can line up the next thing
   # while deciding on the approval. Call and cast forms alike.
-  defp process_event(:awaiting_permission, _type, {:user_prompt, _text}, _data) do
+  defp process_event(:awaiting_permission, _type, {:user_prompt, _text, _opts}, _data) do
     {:keep_state_and_data, [:postpone]}
   end
 
@@ -315,6 +324,13 @@ defmodule ObanClaude.Agent.Instance do
 
   defp reply(nil, _message), do: []
   defp reply(from, message), do: [{:reply, from, message}]
+
+  # `session: :fresh` clears the resume handle at delivery time (not at send
+  # time), so it composes correctly with postponed prompts: the turn that
+  # finally runs starts a new claude session, and its result seeds the new
+  # session id.
+  defp prompt_data(data, %{session: :fresh}), do: %{data | session_id: nil}
+  defp prompt_data(data, _opts), do: data
 
   # Route on the finished turn's structured-output directive.
   defp finish_turn(data, {:ok, %Result{} = result} = payload) do

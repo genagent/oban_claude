@@ -124,26 +124,41 @@ defmodule ObanClaude.Agent do
   postpones it) until the turn finishes / the gate clears; in
   `:waiting_for_user` the prompt is the answer to the pending question and
   resumes the claude session.
+
+  Options (shared with `cast_prompt/3`):
+
+    * `:session` -- `:resume` (default) continues the agent's claude session;
+      `:fresh` starts a new one for this turn (the resume handle is cleared at
+      delivery time, so it composes with queued prompts). Use `:fresh` to stop
+      a long-lived agent's context from growing without bound.
+    * `:origin` -- `:operator` (default) or `:tick`. A `:tick` prompt is a
+      scheduled delivery: in `:waiting_for_user` it queues behind the pending
+      question instead of being consumed as the answer.
+      `ObanClaude.Agent.Tick` sets this; operators rarely should.
   """
-  @spec submit_prompt(agent_id(), String.t()) :: :processing | {:error, term()}
-  def submit_prompt(agent_id, prompt), do: call(agent_id, {:user_prompt, prompt})
+  @spec submit_prompt(agent_id(), String.t(), keyword()) :: :processing | {:error, term()}
+  def submit_prompt(agent_id, prompt, opts \\ []) do
+    call(agent_id, {:user_prompt, prompt, prompt_opts(opts)})
+  end
 
   @doc """
-  The fire-and-forget form of `submit_prompt/2`: never blocks the caller.
+  The fire-and-forget form of `submit_prompt/3`: never blocks the caller.
 
   Returns `:ok` as soon as the cast is sent -- there is no `:processing`
   acknowledgment and no error reply on a failed enqueue (that lands in
   `history/1` as `{:enqueue_failed, reason}`). State handling matches
-  `submit_prompt/2` -- queued in `:running` / `:awaiting_permission`, the
+  `submit_prompt/3` -- queued in `:running` / `:awaiting_permission`, the
   answer in `:waiting_for_user` -- except `:paused`, where the prompt is
   dropped (recorded as `{:dropped_prompt, text}`) since lockdown has no caller
   to refuse. Use this from callers that must not block on a busy agent (a
-  LiveView event handler); use `submit_prompt/2` when you want backpressure
-  and the enqueue acknowledgment.
+  LiveView event handler, a scheduler); use `submit_prompt/3` when you want
+  backpressure and the enqueue acknowledgment. Takes the same options.
   """
-  @spec cast_prompt(agent_id(), String.t()) :: :ok | {:error, :agent_not_running}
-  def cast_prompt(agent_id, prompt) do
-    with_agent(agent_id, &:gen_statem.cast(&1, {:user_prompt, prompt}))
+  @spec cast_prompt(agent_id(), String.t(), keyword()) :: :ok | {:error, :agent_not_running}
+  def cast_prompt(agent_id, prompt, opts \\ []) do
+    # validate opts eagerly, before the registry lookup can short-circuit
+    event = {:user_prompt, prompt, prompt_opts(opts)}
+    with_agent(agent_id, &:gen_statem.cast(&1, event))
   end
 
   @doc """
@@ -218,6 +233,21 @@ defmodule ObanClaude.Agent do
   @spec job_retrying(agent_id(), map()) :: :ok | {:error, :agent_not_running}
   def job_retrying(agent_id, retry) do
     with_agent(agent_id, &:gen_statem.cast(&1, {:job_retrying, retry}))
+  end
+
+  defp prompt_opts(opts) do
+    session = Keyword.get(opts, :session, :resume)
+    origin = Keyword.get(opts, :origin, :operator)
+
+    unless session in [:resume, :fresh] do
+      raise ArgumentError, "unknown :session #{inspect(session)}; expected :resume or :fresh"
+    end
+
+    unless origin in [:operator, :tick] do
+      raise ArgumentError, "unknown :origin #{inspect(origin)}; expected :operator or :tick"
+    end
+
+    %{session: session, origin: origin}
   end
 
   defp poll_await(agent_id, states, deadline) do

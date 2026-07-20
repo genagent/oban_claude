@@ -195,6 +195,53 @@ defmodule ObanClaude.AgentTest do
     end
   end
 
+  describe "prompt options" do
+    test "session: :fresh starts a new claude session for that turn" do
+      id = start_agent!()
+      :processing = Agent.submit_prompt(id, "one")
+      :ok = Agent.job_finished(id, {:ok, result(result: "done", session_id: "sess-1")})
+      {:ok, :idle} = Agent.await(id, :idle, 1_000)
+
+      :processing = Agent.submit_prompt(id, "two", session: :fresh)
+      assert_receive {:enqueued, %{"prompt" => "two"} = args, _meta}
+      refute Map.has_key?(args, "resume")
+
+      # the fresh turn's session becomes the new resume handle
+      :ok = Agent.job_finished(id, {:ok, result(result: "ok", session_id: "sess-2")})
+      {:ok, :idle} = Agent.await(id, :idle, 1_000)
+      :processing = Agent.submit_prompt(id, "three")
+      assert_receive {:enqueued, %{"prompt" => "three", "resume" => "sess-2"}, _meta}
+    end
+
+    test "a tick-origin prompt queues behind a pending question instead of answering it" do
+      id = start_agent!()
+      :processing = Agent.submit_prompt(id, "deploy")
+      assert_receive {:enqueued, _args, _meta}
+
+      turn =
+        structured_result(%{"directive" => "ask_user", "question" => "env?"}, session_id: "s")
+
+      :ok = Agent.job_finished(id, {:ok, turn})
+      {:ok, {:waiting_for_user, "env?"}} = Agent.await(id, :waiting_for_user, 1_000)
+
+      :ok = Agent.cast_prompt(id, "scheduled beat", origin: :tick)
+      settle(id)
+      assert {:ok, {:waiting_for_user, "env?"}} = Agent.status(id)
+      refute_receive {:enqueued, %{"prompt" => "scheduled beat"}, _meta}, 50
+
+      # the operator's answer still owns the question; the beat runs after
+      :processing = Agent.submit_prompt(id, "staging")
+      assert_receive {:enqueued, %{"prompt" => "staging"}, _meta}
+      :ok = Agent.job_finished(id, {:ok, result("deployed")})
+      assert_receive {:enqueued, %{"prompt" => "scheduled beat"}, _meta}
+    end
+
+    test "unknown option values raise" do
+      assert_raise ArgumentError, fn -> Agent.submit_prompt("x", "p", session: :bogus) end
+      assert_raise ArgumentError, fn -> Agent.cast_prompt("x", "p", origin: :cron) end
+    end
+  end
+
   describe "retry-aware routing" do
     test "a retryable attempt keeps the machine :running and records the retry" do
       id = start_agent!()
