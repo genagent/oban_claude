@@ -58,6 +58,16 @@ defmodule ObanClaude.AgentTest do
       assert {:ok, :offline} = Agent.await(id, :offline, 1_000)
     end
 
+    test "list/0 inventories running agents with their status payloads" do
+      a = start_agent!()
+      b = start_agent!()
+      :processing = Agent.submit_prompt(b, "turn")
+
+      listed = Map.new(Agent.list())
+      assert listed[a] == :idle
+      assert listed[b] == :running
+    end
+
     test "atom keys in :args fail fast at start" do
       assert {:error, %ArgumentError{message: message}} =
                Agent.start_agent("bad-args", args: %{model: "sonnet"})

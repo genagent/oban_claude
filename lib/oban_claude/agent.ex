@@ -95,6 +95,16 @@ defmodule ObanClaude.Agent do
   end
 
   @doc """
+  All running agents as `{agent_id, status}` pairs, straight off the registry
+  (no process is messaged). Order is unspecified. The fleet-inventory read for
+  dashboards and supervisors.
+  """
+  @spec list() :: [{agent_id(), status()}]
+  def list do
+    Registry.select(@registry, [{{:"$1", :_, :"$2"}, [], [{{:"$1", :"$2"}}]}])
+  end
+
+  @doc """
   Block until the agent settles into one of `states` (a state atom or list of
   them), returning the full `t:status/0` it landed on -- so a gated state
   arrives with its payload:
