@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/genagent/oban_claude/compare/v0.3.0...v0.4.0) (2026-07-21)
+
+
+### Features
+
+* add the agent lifecycle layer (ObanClaude.Agent) ([#115](https://github.com/genagent/oban_claude/issues/115)) ([5f3d80e](https://github.com/genagent/oban_claude/commit/5f3d80e184040186bc60ac47a70bbed5379ce0c5))
+
 ## [0.3.0](https://github.com/genagent/oban_claude/compare/v0.2.0...v0.3.0) (2026-07-14)
 
 
