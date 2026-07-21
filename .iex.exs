@@ -13,4 +13,9 @@ oban_claude:
   ObanClaude.Console.start()      boot a local SQLite-backed queue
   ObanClaude.Console.run("...")   enqueue a prompt (prints the result when it finishes)
   ObanClaude.Console.jobs()       list recent jobs
+
+agent spike (after Console.start()):
+  ObanClaude.Agent.start_agent("a1", args: %{"model" => "haiku"})
+  ObanClaude.Agent.submit_prompt("a1", "reply with hi")
+  ObanClaude.Agent.await("a1", :idle) |> then(fn _ -> ObanClaude.Agent.history("a1") end)
 """)

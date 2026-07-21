@@ -28,10 +28,24 @@ defmodule ObanClaude.MixProject do
           "README.md",
           "guides/getting_started.md",
           "guides/agent_worker_patterns.md",
+          "guides/agent_lifecycle.md",
           "CHANGELOG.md"
         ],
         groups_for_extras: [
-          Guides: ["guides/getting_started.md", "guides/agent_worker_patterns.md"]
+          Guides: [
+            "guides/getting_started.md",
+            "guides/agent_worker_patterns.md",
+            "guides/agent_lifecycle.md"
+          ]
+        ],
+        groups_for_modules: [
+          "Agent lifecycle": [
+            ObanClaude.Agent,
+            ObanClaude.Agent.Instance,
+            ObanClaude.Agent.Job,
+            ObanClaude.Agent.Supervisor,
+            ObanClaude.Agent.Tick
+          ]
         ]
       ]
     ]
