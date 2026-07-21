@@ -23,7 +23,7 @@ call that returns a typed `%ClaudeWrapper.Result{}` / `%ClaudeWrapper.Error{}`.
 def deps do
   [
     {:oban, "~> 2.23"},
-    {:oban_claude, "~> 0.2"}
+    {:oban_claude, "~> 0.4"}
   ]
 end
 ```
@@ -88,7 +88,7 @@ end
 MyApp.PrReview.new(%{"prompt" => "PR #4321: " <> diff}) |> Oban.insert()
 ```
 
-Because the job wins the merge, `:args` are **defaults, not guardrails** — a job
+Because the job wins the merge, `:args` are **defaults, not guardrails** -- a job
 can override any of them, including `permission_mode` or a budget cap. To make a
 key worker-invariant, put it in `:pinned_args`, which merges *over* the job
 (precedence: `pinned_args > job > args`):
@@ -322,6 +322,36 @@ A classifier must return the `{oban_return, payload}` envelope -- e.g.
 on a flat verdict, since `ObanClaude.Worker` would otherwise hand Oban a bare
 atom, which it records as success.
 
+## Long-lived agents (experimental)
+
+Everything above is one-shot: a job runs, a verdict lands. The **agent layer**
+is the stateful floor on top: one agent = one `:gen_statem` process whose
+turns run as ordinary `ObanClaude.Worker` jobs, with the claude session id
+threading turn to turn -- one persistent conversation that never blocks a
+process on claude. Opt-in (add `ObanClaude.Agent.Supervisor` to your tree and
+an `agents`/`ticks` queue pair); the core seam is untouched by it.
+
+```elixir
+{:ok, _} = ObanClaude.Agent.start_agent("a1", args: %{"model" => "haiku"})
+:processing = ObanClaude.Agent.submit_prompt("a1", "reply with just: hi")
+{:ok, :idle} = ObanClaude.Agent.await("a1", :idle, 120_000)
+```
+
+What the machine gives you: prompts postpone while a turn is in flight (with
+a watchdog); structured-output **directives** route the post-turn state
+(`ask_user` -> `:waiting_for_user`, `request_permission` ->
+`:awaiting_permission`); **approvals actually elevate** (per-approval
+`:approved_args`, e.g. `accept_edits` or an isolated `worktree`) and
+approved-but-incomplete work re-gates instead of dying; retries stay one
+logical turn; `ObanClaude.Agent.Tick` turns an `Oban.Plugins.Cron` entry into
+a self-(re)starting scheduled routine; and `status/1`/`await/3`/`list/0` read
+the fleet off the registry without messaging a process. Fully testable with
+no DB and no claude via the `:enqueue_fun` seam.
+
+See the [Agent lifecycle](guides/agent_lifecycle.md) guide, and
+`examples/agent_lifecycle.exs` (offline) / `agent_live.exs`,
+`agent_retry_live.exs`, `agent_routine_live.exs` (real paid runs).
+
 ## Examples
 
 Runnable scripts (throwaway SQLite-backed Oban; claude is stubbed via
@@ -339,14 +369,25 @@ build, not your first `mix run`:
   debounced to one run by Oban's `unique`, a distinct event gets its own.
 - `triage_issues.exs` -- a worker configured for issue triage; offline by
   default (baked issues if `gh` is absent), `--live` for real paid haiku calls.
+- `agent_lifecycle.exs` -- the agent state machine end to end, claude stubbed:
+  a plain turn, an approved permission gate (with the `:approved_args`
+  elevation visible), an answered question, and the emergency pause.
 
-Two more aren't run in CI -- one is slow, one is interactive:
+The rest aren't run in CI -- slow, interactive, or real money:
 
 - `scheduled_routine.exs` -- a Cron-driven routine: the worker holds the prompt,
   the job is empty, and `Oban.Plugins.Cron` fires it on a schedule (waits ~70s
   for a real Cron tick).
+- `agent_routine.exs` -- the same shape through the agent layer: Cron fires
+  `ObanClaude.Agent.Tick`, a skipped busy beat lands as a cancelled row
+  (waits ~70s for a real tick).
 - `console.exs` -- a local queue you drive from `iex -S mix` (loaded by
-  `.iex.exs`); each `run/1` is a real, paid claude call.
+  `.iex.exs`); each `run/1` is a real, paid claude call. `Console.start()`
+  also boots the agent tree, so it doubles as the barebones live agent demo.
+- `agent_live.exs`, `agent_retry_live.exs`, `agent_routine_live.exs` -- the
+  agent layer against real claude (paid): the full gated loop in a throwaway
+  workspace, the retry path with a genuinely failed first attempt, and a real
+  cron routine that cold-starts its own agent from the crontab spec.
 
 To scaffold a fresh project with all the pieces wired (SQLite, Oban, a sample
 worker, a boot-time watch demo), use the [Igniter](https://hexdocs.pm/igniter)
@@ -374,7 +415,7 @@ mix igniter.install oban_claude
 ```
 
 The `mix oban_claude` command tree (a [`cheer`](https://hexdocs.pm/cheer)
-CLI) runs claude straight from the shell — no queue, no database. Every `run` /
+CLI) runs claude straight from the shell -- no queue, no database. Every `run` /
 `args` flag maps to the same `Args.new/1` vocabulary; `mix oban_claude <cmd>
 --help` lists them.
 
@@ -422,11 +463,11 @@ fleet's spend and outcomes without touching the workers:
 | `[:oban_claude, :run, :exception]` | the query returned `{:error, _}` (typed or off-contract) | `:cost_usd` off a rail-stop reason (`0.0` otherwise) |
 
 Both carry `:duration`, the `:args` map, and a slim `:job` map
-(`%{id, queue, worker, attempt, max_attempts, meta}`, or `nil` outside a job) —
+(`%{id, queue, worker, attempt, max_attempts, meta}`, or `nil` outside a job) --
 so `job.meta` is your identity/attribution channel. **Summing `:cost_usd` across
 *both* events gives a complete spend total** (a budget rail-stop is an
 `:exception` that still spent money). See `ObanClaude` for the full metadata
-contract — and note `:args` / `:result` / `:error` can embed prompts and raw CLI
+contract -- and note `:args` / `:result` / `:error` can embed prompts and raw CLI
 output, so redact before shipping to a log aggregator.
 
 ## Module reference
@@ -434,20 +475,32 @@ output, so redact before shipping to a log aggregator.
 | Module | Description |
 |---|---|
 | `ObanClaude` | The engine (`run/2`) + result readers (`outcome/1`, `structured/1`, `session_id/1`, `cost_usd/1`) |
-| `ObanClaude.Worker` | `use ObanClaude.Worker` — the worker macro; `handle_result/2` (success) and `handle_error/3` (every non-`:ok` verdict) overrides |
-| `ObanClaude.Args` | Validated args builder — `new/1` (prompt-required) / `defaults/1` (prompt-optional, for worker `:args`) |
+| `ObanClaude.Worker` | `use ObanClaude.Worker` -- the worker macro; `handle_result/2` (success) and `handle_error/3` (every non-`:ok` verdict) overrides |
+| `ObanClaude.Args` | Validated args builder -- `new/1` (prompt-required) / `defaults/1` (prompt-optional, for worker `:args`) |
 | `ObanClaude.Outcome` | The default, overridable outcome → Oban-return classifier (`classify/1`) |
 | `ObanClaude.Testing` | Build `:query_fun` stubs without hard-coding `claude_wrapper` structs |
+| `ObanClaude.Agent` | The agent facade (experimental) -- start/status/await/prompt/approve/pause a fleet of `:gen_statem` agents whose turns are jobs |
+| `ObanClaude.Agent.Instance` | The `:gen_statem`: states, directives, watchdog, approval re-gating, session threading |
+| `ObanClaude.Agent.Job` | The default turn worker; terminal-aware retry routing back to the machine |
+| `ObanClaude.Agent.Tick` | The Cron-to-agent adapter: a crontab entry is a self-(re)starting routine |
+| `ObanClaude.Agent.Supervisor` | Registry + DynamicSupervisor, added to the host tree to opt in |
 | `Mix.Tasks.ObanClaude` | The `mix oban_claude run/doctor/args` command tree |
 | `Mix.Tasks.ObanClaude.Install` | Igniter installer that scaffolds a SQLite-backed setup |
 
 ## What it does NOT do
 
-No state, no daemon, no "sink". It runs the agent and returns the
+The core is stateless: no daemon, no "sink". It runs the agent and returns the
 verdict. Whether the agent effects its own writes (full-auto) or returns
 structured data for a downstream effector is the *job's* concern, encoded in the
 prompt and permission mode. Persisting results and reacting to completion are the
 caller's job (`handle_result/2` + the `[:oban_claude, :run, :stop]` telemetry).
+
+The one deliberate exception is the opt-in agent layer above: `ObanClaude.Agent`
+runs long-lived processes, but only when you add its supervisor to your tree,
+and it owns *lifecycle*, not operations -- durable spend ledgers, persisted
+notebooks, gate records that survive restarts, notifications, dashboards, and
+MCP surfaces all remain application concerns (see the
+[Agent lifecycle](guides/agent_lifecycle.md) guide's closing section).
 
 See [SPEC.md](https://github.com/genagent/oban_claude/blob/main/SPEC.md) for the
 design and the build-out checklist.

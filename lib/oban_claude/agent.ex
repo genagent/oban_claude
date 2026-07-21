@@ -6,8 +6,9 @@ defmodule ObanClaude.Agent do
   >
   > The agent layer is the stateful floor above the stateless `ObanClaude`
   > seam. It is opt-in (nothing runs unless `ObanClaude.Agent.Supervisor` is
-  > in your tree) and experimental: the API may change, and the layer may
-  > move to a sibling package.
+  > in your tree) and experimental: the API may change between minor
+  > releases while it carries this marker. See the
+  > [Agent lifecycle](agent_lifecycle.html) guide.
 
   One agent is one `ObanClaude.Agent.Instance` (`:gen_statem`) registered
   under a caller-chosen id. A prompt does not block on claude: it enqueues an

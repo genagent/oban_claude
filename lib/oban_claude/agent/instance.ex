@@ -20,7 +20,10 @@ defmodule ObanClaude.Agent.Instance do
     * `:awaiting_permission` -- the last turn requested approval (directive
       `"request_permission"`); `approve` resumes the session with the action
       (under `:approved_args`, see below), `reject` records the denial and
-      returns to `:idle`, and prompts are `:postpone`d until the gate clears
+      returns to `:idle`, and prompts are `:postpone`d until the gate clears.
+      An approved turn that fails or hits the watchdog RE-GATES (same
+      description, fresh id, `{:approval_incomplete, reason}` in history):
+      the work was approved but not completed, and a re-approval resumes it
     * `:paused` -- lockdown via `:emergency_pause`; every call is refused until
       an explicit `resume`
 
@@ -111,7 +114,11 @@ defmodule ObanClaude.Agent.Instance do
       turns: 0,
       cost_usd: 0.0,
       pending_action: nil,
-      pending_question: nil
+      pending_question: nil,
+      # set while an approve continuation is in flight: an approved turn that
+      # fails or times out RE-GATES (the action was approved but not
+      # completed) instead of falling to :idle with the elevation lost
+      in_flight_approval: nil
     }
 
     {:ok, :idle, data}
@@ -158,10 +165,16 @@ defmodule ObanClaude.Agent.Instance do
     {:keep_state_and_data, [{:reply, from, {:ok, info}}]}
   end
 
-  # "Drops active scopes": a pending action or question does not survive the
-  # lockdown; after resume the operator starts from a clean :idle.
+  # "Drops active scopes": a pending action, question, or in-flight approval
+  # does not survive the lockdown; after resume the operator starts clean.
   defp process_event(state, :cast, :emergency_pause, data) when state != :paused do
-    data = %{record(data, {:paused_from, state}) | pending_action: nil, pending_question: nil}
+    data = %{
+      record(data, {:paused_from, state})
+      | pending_action: nil,
+        pending_question: nil,
+        in_flight_approval: nil
+    }
+
     {:next_state, :paused, data}
   end
 
@@ -229,8 +242,8 @@ defmodule ObanClaude.Agent.Instance do
   end
 
   defp process_event(:running, :state_timeout, :job_watchdog, data) do
-    Logger.warning("ObanClaude.Agent #{data.id}: job watchdog fired, returning to :idle")
-    {:next_state, :idle, record(data, :watchdog_timeout)}
+    Logger.warning("ObanClaude.Agent #{data.id}: job watchdog fired")
+    regate_or_idle(record(data, :watchdog_timeout), :watchdog_timeout)
   end
 
   # ---------------------------------------------------------------------------
@@ -269,7 +282,14 @@ defmodule ObanClaude.Agent.Instance do
     case data.pending_action do
       %{id: ^id, description: description} ->
         prompt = "Approved: #{description}. Proceed."
-        start_turn(from, prompt, %{data | pending_action: nil}, data.config.approved_args)
+
+        data = %{
+          data
+          | pending_action: nil,
+            in_flight_approval: %{description: description}
+        }
+
+        start_turn(from, prompt, data, data.config.approved_args)
 
       _ ->
         {:keep_state_and_data, [{:reply, from, {:error, :unknown_action}}]}
@@ -337,9 +357,10 @@ defmodule ObanClaude.Agent.Instance do
   defp prompt_data(data, %{session: :fresh}), do: %{data | session_id: nil}
   defp prompt_data(data, _opts), do: data
 
-  # Route on the finished turn's structured-output directive.
+  # Route on the finished turn's structured-output directive. A completed
+  # approve continuation resolves its approval, whatever it returns.
   defp finish_turn(data, {:ok, %Result{} = result} = payload) do
-    data = absorb(data, payload)
+    data = %{absorb(data, payload) | in_flight_approval: nil}
 
     case directive(result) do
       {:ask_user, question} ->
@@ -354,8 +375,23 @@ defmodule ObanClaude.Agent.Instance do
     end
   end
 
-  defp finish_turn(data, {:error, _verdict, _payload} = failure) do
-    {:next_state, :idle, absorb(data, failure)}
+  defp finish_turn(data, {:error, verdict, _payload} = failure) do
+    regate_or_idle(absorb(data, failure), verdict)
+  end
+
+  # An approved turn that did not complete (failed verdict, watchdog) re-gates:
+  # the action was approved but the work is not done, so it goes back to
+  # :awaiting_permission (same description, fresh id) rather than silently
+  # dropping the elevation on the floor. The captured session id means a
+  # re-approval resumes the interrupted work. Unapproved turns fall to :idle.
+  defp regate_or_idle(%{in_flight_approval: nil} = data, _reason) do
+    {:next_state, :idle, data}
+  end
+
+  defp regate_or_idle(%{in_flight_approval: %{description: description}} = data, reason) do
+    action = %{id: action_id(), description: description}
+    data = record(data, {:approval_incomplete, reason})
+    {:next_state, :awaiting_permission, %{data | pending_action: action, in_flight_approval: nil}}
   end
 
   # Fold a turn's payload into the data: a history entry (the decoded

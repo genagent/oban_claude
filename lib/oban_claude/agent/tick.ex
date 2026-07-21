@@ -58,9 +58,15 @@ defmodule ObanClaude.Agent.Tick do
   `max_attempts: 1`: a tick is a point-in-time beat; retrying a failed one
   later would deliver a stale prompt (and risk a duplicate), so a missed beat
   is simply missed. The cancels are visible per-beat in the `oban_jobs` table.
+
+  Ticks default to their OWN queue (`:ticks` -- run it alongside the agents
+  queue, e.g. `queues: [agents: 2, ticks: 1]`). On a queue shared with agent
+  turns a tick serializes BEHIND the very turn it should observe, so by the
+  time it runs the agent looks idle again and the `"skip"` policy can never
+  fire -- a lesson from live fleet use.
   """
 
-  use Oban.Worker, queue: :agents, max_attempts: 1
+  use Oban.Worker, queue: :ticks, max_attempts: 1
 
   alias ObanClaude.Agent
 

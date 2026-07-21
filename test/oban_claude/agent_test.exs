@@ -539,6 +539,91 @@ defmodule ObanClaude.AgentTest do
     end
   end
 
+  describe "approval continuity (re-gate on incomplete approved work)" do
+    defp approve_gated!(id) do
+      :processing = Agent.submit_prompt(id, "plan")
+      assert_receive {:enqueued, _args, _meta}
+
+      turn =
+        structured_result(
+          %{"directive" => "request_permission", "action" => "rewrite lib/core.ex"},
+          session_id: "sess-a"
+        )
+
+      :ok = Agent.job_finished(id, {:ok, turn})
+
+      {:ok, {:awaiting_permission, %{id: action_id}}} =
+        Agent.await(id, :awaiting_permission, 1_000)
+
+      :processing = Agent.approve_action(id, action_id)
+      assert_receive {:enqueued, %{"prompt" => "Approved: " <> _rest}, _meta}
+      action_id
+    end
+
+    test "a failed approved turn re-gates with the same description and a fresh id" do
+      id = start_agent!(approved_args: %{"permission_mode" => "accept_edits"})
+      first_action_id = approve_gated!(id)
+
+      err = error(:max_budget_exceeded, reason: %{session_id: "sess-b", cost_usd: 1.5})
+      :ok = Agent.job_finished(id, {:error, {:cancel, :max_budget_exceeded}, err})
+
+      assert {:ok, {:awaiting_permission, %{id: new_id, description: "rewrite lib/core.ex"}}} =
+               Agent.await(id, :awaiting_permission, 1_000)
+
+      assert new_id != first_action_id
+
+      {:ok, history} = Agent.history(id)
+      assert Enum.any?(history, &match?({:approval_incomplete, {:cancel, _}}, &1))
+
+      # a re-approval resumes the interrupted session, still elevated
+      :processing = Agent.approve_action(id, new_id)
+
+      assert_receive {:enqueued,
+                      %{
+                        "prompt" => "Approved: " <> _rest,
+                        "resume" => "sess-b",
+                        "permission_mode" => "accept_edits"
+                      }, _meta}
+    end
+
+    test "a watchdog timeout of an approved turn re-gates too" do
+      id = start_agent!(job_timeout: 50)
+      approve_gated!(id)
+
+      assert {:ok, {:awaiting_permission, %{description: "rewrite lib/core.ex"}}} =
+               Agent.await(id, :awaiting_permission, 1_000)
+    end
+
+    test "a completed approved turn resolves the approval (no re-gate)" do
+      id = start_agent!()
+      approve_gated!(id)
+
+      :ok = Agent.job_finished(id, {:ok, result("edit done")})
+      assert {:ok, :idle} = Agent.await(id, :idle, 1_000)
+    end
+
+    test "an unapproved failed turn still falls to :idle" do
+      id = start_agent!()
+      :processing = Agent.submit_prompt(id, "plain")
+      :ok = Agent.job_finished(id, {:error, {:cancel, :auth}, error(:auth)})
+      assert {:ok, :idle} = Agent.await(id, :idle, 1_000)
+    end
+
+    test "pause during an approved turn drops the in-flight approval" do
+      id = start_agent!()
+      approve_gated!(id)
+
+      :ok = Agent.emergency_pause(id)
+      {:ok, :paused} = Agent.await(id, :paused, 1_000)
+      :resumed = Agent.resume_agent(id)
+
+      # the late failure of the approved turn must NOT resurrect the gate
+      :ok = Agent.job_finished(id, {:error, {:cancel, :timeout}, error(:timeout)})
+      settle(id)
+      assert {:ok, :idle} = Agent.status(id)
+    end
+  end
+
   describe "invalid actions" do
     test "an action invalid for the current state names the state in the error" do
       id = start_agent!()
