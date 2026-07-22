@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/genagent/oban_claude/compare/v0.4.0...v0.5.0) (2026-07-22)
+
+
+### Features
+
+* emit run-start telemetry before the claude subprocess launches ([#120](https://github.com/genagent/oban_claude/issues/120)) ([b08d1b8](https://github.com/genagent/oban_claude/commit/b08d1b89811595cde0e0aedd65ca976901a4d9ad))
+* stamp the conversational arc's origin into agent job meta ([#118](https://github.com/genagent/oban_claude/issues/118)) ([0e8835c](https://github.com/genagent/oban_claude/commit/0e8835c6c0a85425db98b22377a3b3d4a0b2bad5))
+
 ## [0.4.0](https://github.com/genagent/oban_claude/compare/v0.3.0...v0.4.0) (2026-07-21)
 
 
