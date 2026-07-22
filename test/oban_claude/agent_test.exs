@@ -250,6 +250,31 @@ defmodule ObanClaude.AgentTest do
       assert_raise ArgumentError, fn -> Agent.submit_prompt("x", "p", session: :bogus) end
       assert_raise ArgumentError, fn -> Agent.cast_prompt("x", "p", origin: :cron) end
     end
+
+    test "job meta carries the arc's origin, and continuations inherit it" do
+      id = start_agent!(approved_args: %{"model" => "opus"})
+
+      # an operator prompt stamps origin operator
+      :processing = Agent.submit_prompt(id, "how do things look?")
+      assert_receive {:enqueued, _args, %{"agent_id" => ^id, "origin" => "operator"}}
+
+      # the approve continuation of that arc keeps the operator origin
+      turn =
+        structured_result(%{"directive" => "request_permission", "action" => "fix it"},
+          session_id: "s"
+        )
+
+      :ok = Agent.job_finished(id, {:ok, turn})
+      {:ok, {:awaiting_permission, action}} = Agent.await(id, :awaiting_permission, 1_000)
+      :processing = Agent.approve_action(id, action.id)
+      assert_receive {:enqueued, _args, %{"origin" => "operator"}}
+      :ok = Agent.job_finished(id, {:ok, result(result: "fixed", session_id: "s")})
+      {:ok, :idle} = Agent.await(id, :idle, 1_000)
+
+      # a scheduled beat flips the arc to tick origin
+      :ok = Agent.cast_prompt(id, "do your sweep now", origin: :tick)
+      assert_receive {:enqueued, _args, %{"agent_id" => ^id, "origin" => "tick"}}
+    end
   end
 
   describe "retry-aware routing" do

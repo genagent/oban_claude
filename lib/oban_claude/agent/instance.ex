@@ -118,7 +118,12 @@ defmodule ObanClaude.Agent.Instance do
       # set while an approve continuation is in flight: an approved turn that
       # fails or times out RE-GATES (the action was approved but not
       # completed) instead of falling to :idle with the elevation lost
-      in_flight_approval: nil
+      in_flight_approval: nil,
+      # the origin of the current conversational arc (:operator or :tick),
+      # stamped into every enqueued job's meta so downstream consumers
+      # (feeds, dashboards) can tell an operator's question from scheduled
+      # work. Approve/reject continuations inherit the arc's origin.
+      origin: :tick
     }
 
     {:ok, :idle, data}
@@ -354,8 +359,13 @@ defmodule ObanClaude.Agent.Instance do
   # time), so it composes correctly with postponed prompts: the turn that
   # finally runs starts a new claude session, and its result seeds the new
   # session id.
-  defp prompt_data(data, %{session: :fresh}), do: %{data | session_id: nil}
-  defp prompt_data(data, _opts), do: data
+  defp prompt_data(data, %{session: :fresh} = opts) do
+    %{data | session_id: nil, origin: Map.get(opts, :origin, :operator)}
+  end
+
+  defp prompt_data(data, opts) do
+    %{data | origin: Map.get(opts, :origin, :operator)}
+  end
 
   # Route on the finished turn's structured-output directive. A completed
   # approve continuation resolves its approval, whatever it returns.
@@ -432,14 +442,19 @@ defmodule ObanClaude.Agent.Instance do
   end
 
   defp enqueue(%{config: %{enqueue_fun: fun}} = data, args) when is_function(fun, 2) do
-    fun.(args, %{"agent_id" => data.id})
+    fun.(args, job_meta(data))
   end
 
   defp enqueue(data, args) do
     args
-    |> data.config.worker.new(meta: %{"agent_id" => data.id})
+    |> data.config.worker.new(meta: job_meta(data))
     |> then(&Oban.insert(data.config.oban, &1))
   end
+
+  # Job meta identifies the turn for downstream telemetry consumers: whose
+  # turn it is, and whether the conversational arc began with an operator
+  # prompt or a scheduled tick.
+  defp job_meta(data), do: %{"agent_id" => data.id, "origin" => to_string(data.origin)}
 
   defp maybe_resume(args, nil), do: args
   defp maybe_resume(args, session_id), do: Map.put(args, "resume", session_id)
