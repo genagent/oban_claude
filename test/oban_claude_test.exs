@@ -271,6 +271,28 @@ defmodule ObanClaudeTest do
       {:ok, attach: attach}
     end
 
+    test "emits :start with args and job meta before the query runs", %{attach: attach} do
+      attach.([:oban_claude, :run, :start], "oc-start")
+      test_pid = self()
+      args = %{"prompt" => "x", "worktree" => "tripwire-demo"}
+
+      ObanClaude.run(args,
+        job: %Oban.Job{meta: %{"agent_id" => "brc", "origin" => "tick"}},
+        query_fun: fn _p, _o ->
+          # the start event must precede the query -- assert from inside it
+          send(test_pid, {:query_ran, Process.info(test_pid, :message_queue_len)})
+          {:ok, %Result{result: "done", is_error: false}}
+        end
+      )
+
+      assert_received {:telemetry, [:oban_claude, :run, :start], measurements, metadata}
+      assert is_integer(measurements.system_time)
+      assert metadata.args == args
+      assert metadata.job.meta["agent_id"] == "brc"
+      # the telemetry message was already in the queue when the query ran
+      assert_received {:query_ran, {:message_queue_len, len}} when len >= 1
+    end
+
     test "emits :stop with duration/cost_usd and result/args on success", %{attach: attach} do
       attach.([:oban_claude, :run, :stop], "oc-stop")
       result = %Result{result: "hi", is_error: false, cost_usd: 0.0012}
