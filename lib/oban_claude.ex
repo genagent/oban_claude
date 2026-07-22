@@ -198,6 +198,7 @@ defmodule ObanClaude do
     {prompt, query_opts} = build(args)
 
     start = System.monotonic_time()
+    emit_start(args, job)
     outcome = query_fun.(prompt, query_opts)
     emit(outcome, start, args, job)
 
@@ -329,6 +330,17 @@ defmodule ObanClaude do
   defp valid_return?({{:snooze, n}, _payload}) when is_integer(n) and n > 0, do: true
   defp valid_return?({{:snooze, {n, _unit}}, _payload}) when is_integer(n) and n > 0, do: true
   defp valid_return?(_other), do: false
+
+  # The span start: consumers that need state-of-the-world BEFORE the claude
+  # subprocess runs (worktree tripwires, live "turn started" displays) hook
+  # here; stop/exception carry the outcome as before.
+  defp emit_start(args, job) do
+    :telemetry.execute(
+      [:oban_claude, :run, :start],
+      %{system_time: System.system_time()},
+      %{args: args, job: job_meta(job)}
+    )
+  end
 
   defp emit({:ok, %Result{} = r}, start, args, job) do
     :telemetry.execute(
