@@ -19,7 +19,7 @@ defmodule ObanClaude.Agent.Instance do
       resumes the claude session
     * `:awaiting_permission` -- the last turn requested approval (directive
       `"request_permission"`); `approve` resumes the session with the action
-      (under `:approved_args`, see below), `reject` records the denial and
+      (under `:approved_args`, plus any per-approval `:args`, see below), `reject` records the denial and
       returns to `:idle`, and prompts are `:postpone`d until the gate clears.
       An approved turn that fails or hits the watchdog RE-GATES (same
       description, fresh id, `{:approval_incomplete, reason}` in history):
@@ -283,9 +283,15 @@ defmodule ObanClaude.Agent.Instance do
     {:keep_state_and_data, [:postpone]}
   end
 
-  defp process_event(:awaiting_permission, {:call, from}, {:approve_action, id}, data) do
-    case data.pending_action do
-      %{id: ^id, description: description} ->
+  # `args` is the caller's override for this one continuation, merged over
+  # the standing :approved_args. A bad map is refused and the gate stays open:
+  # it arrives in a call, and a call must never raise inside the agent.
+  defp process_event(:awaiting_permission, {:call, from}, {:approve_action, id, args}, data) do
+    case {data.pending_action, invalid_keys(args)} do
+      {%{id: ^id}, [_bad | _rest] = keys} ->
+        {:keep_state_and_data, [{:reply, from, {:error, {:invalid_args, keys}}}]}
+
+      {%{id: ^id, description: description}, []} ->
         prompt = "Approved: #{description}. Proceed."
 
         data = %{
@@ -294,7 +300,7 @@ defmodule ObanClaude.Agent.Instance do
             in_flight_approval: %{description: description}
         }
 
-        start_turn(from, prompt, data, data.config.approved_args)
+        start_turn(from, prompt, data, Map.merge(data.config.approved_args, args))
 
       _ ->
         {:keep_state_and_data, [{:reply, from, {:error, :unknown_action}}]}
@@ -484,6 +490,9 @@ defmodule ObanClaude.Agent.Instance do
 
   # The same silent-drop trap ObanClaude.Worker guards at compile time (#75):
   # atom keys would vanish in the string-keyed merge with each job's args.
+  defp invalid_keys(args) when is_map(args), do: Enum.reject(Map.keys(args), &is_binary/1)
+  defp invalid_keys(other), do: [other]
+
   defp validate_string_keys!(key, args) when is_map(args) do
     case Enum.reject(Map.keys(args), &is_binary/1) do
       [] ->
