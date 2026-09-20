@@ -425,6 +425,39 @@ defmodule ObanClaude.AgentTest do
       refute Map.has_key?(args, "permission_mode")
     end
 
+    test "approve_action's :args size the elevation to this one approval (#121)" do
+      id = start_agent!(approved_args: %{"permission_mode" => "bypass_permissions"})
+      action_id = block_on_permission!(id)
+
+      assert :processing =
+               Agent.approve_action(id, action_id,
+                 args: %{"permission_mode" => "default", "max_turns" => 5}
+               )
+
+      # the override wins over the standing approved_args, key by key
+      assert_receive {:enqueued, %{"permission_mode" => "default", "max_turns" => 5}, _meta}
+
+      # and is not remembered: the next approval is back to the standing args
+      :ok = Agent.job_finished(id, {:ok, result("done")})
+      next_id = block_on_permission!(id)
+      assert :processing = Agent.approve_action(id, next_id)
+      assert_receive {:enqueued, %{"permission_mode" => "bypass_permissions"} = args, _meta}
+      refute Map.has_key?(args, "max_turns")
+    end
+
+    test "approve_action refuses non-string :args keys and leaves the action pending" do
+      id = start_agent!()
+      action_id = block_on_permission!(id)
+
+      assert {:error, {:invalid_args, [:permission_mode]}} =
+               Agent.approve_action(id, action_id, args: %{permission_mode: "default"})
+
+      assert {:ok, {:awaiting_permission, %{id: ^action_id}}} = Agent.status(id)
+      refute_receive {:enqueued, _args, _meta}, 50
+
+      assert :processing = Agent.approve_action(id, action_id)
+    end
+
     test "reject_action records the denial and returns to :idle without enqueuing" do
       id = start_agent!()
       action_id = block_on_permission!(id)

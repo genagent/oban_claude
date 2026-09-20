@@ -179,9 +179,21 @@ defmodule ObanClaude.Agent do
   its prompt, and carries the agent's `:approved_args` (e.g. a
   `permission_mode` elevation) merged over the default args -- so approval
   actually unlocks the tools the action needs, on that turn only.
+
+  ## Options
+
+    * `:args` -- a string-keyed map of claude args merged over `:approved_args`
+      for THIS continuation only. The caller knows what was approved, so it
+      can size the elevation to it: an approval to comment on a pull request
+      needs no shell, whatever the agent's standing `:approved_args` say.
+      Nothing is remembered; if the approved turn fails and re-gates, the
+      re-approval supplies its own. Non-string keys are refused with
+      `{:error, {:invalid_args, keys}}` and the action stays pending.
   """
-  @spec approve_action(agent_id(), String.t()) :: :processing | {:error, term()}
-  def approve_action(agent_id, action_id), do: call(agent_id, {:approve_action, action_id})
+  @spec approve_action(agent_id(), String.t(), keyword()) :: :processing | {:error, term()}
+  def approve_action(agent_id, action_id, opts \\ []) do
+    call(agent_id, {:approve_action, action_id, Keyword.get(opts, :args, %{})})
+  end
 
   @doc "Reject the pending action: the denial is recorded and the agent returns to `:idle`."
   @spec reject_action(agent_id(), String.t(), String.t()) :: :rejected | {:error, term()}
