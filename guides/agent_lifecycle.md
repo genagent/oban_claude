@@ -97,11 +97,18 @@ the answer to a pending question.
 ## Retries are one logical turn
 
 `ObanClaude.Agent.Job` routes terminal-aware: `{:cancel, _}` or a final
-`{:error, _}` reports `job_finished/2`; a retryable failure or `{:snooze, _}`
-reports `job_retrying/2`, which keeps the machine in `:running` and re-arms
+`{:error, _}` reports `job_finished/3`; a retryable failure or `{:snooze, _}`
+reports `job_retrying/3`, which keeps the machine in `:running` and re-arms
 the watchdog. The default worker stays `max_attempts: 1` (every retry is a
 paid call); opt in with a three-line delegating worker -- see
 `ObanClaude.Agent.Job`.
+
+Every job carries an opaque instance generation and logical turn id in its
+metadata. The instance checks both inside the state machine before changing
+state, session, approval, counters, or watchdogs. Late outcomes, duplicate
+callbacks, and callbacks from an earlier same-id process are retained only as
+bounded diagnostics. Custom workers that delegate their result and error
+callbacks to `ObanClaude.Agent.Job` inherit this behavior automatically.
 
 ## Scheduling: a crontab entry is an agent
 
@@ -144,9 +151,9 @@ very turn it should observe as busy, and skip-policy can never fire.
 
 ## Testing without a queue or claude
 
-The `:enqueue_fun` config replaces the Oban insert, and `job_finished/2` is
-the public return path -- so a test drives the whole machine with no DB and
-no claude:
+The `:enqueue_fun` config replaces the Oban insert. Tests capture the metadata
+passed to that function and return it through `job_finished/3`, so they drive
+the whole machine with no DB and no claude while preserving turn ownership:
 
     test_pid = self()
 
@@ -159,9 +166,14 @@ no claude:
       )
 
     :processing = ObanClaude.Agent.submit_prompt("t1", "go")
-    assert_receive {:enqueued, %{"prompt" => "go"}, %{"agent_id" => "t1"}}
+    assert_receive {:enqueued, %{"prompt" => "go"}, %{"agent_id" => "t1"} = meta}
 
-    :ok = ObanClaude.Agent.job_finished("t1", {:ok, ObanClaude.Testing.result("done")})
+    :ok =
+      ObanClaude.Agent.job_finished(
+        "t1",
+        {:ok, ObanClaude.Testing.result("done")},
+        meta
+      )
     {:ok, :idle} = ObanClaude.Agent.await("t1", :idle, 1_000)
 
 Build payloads with `ObanClaude.Testing` (`result/1`, `structured_result/2`

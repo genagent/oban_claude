@@ -13,7 +13,7 @@ defmodule ObanClaude.Agent do
   One agent is one `ObanClaude.Agent.Instance` (`:gen_statem`) registered
   under a caller-chosen id. A prompt does not block on claude: it enqueues an
   `ObanClaude.Worker` job and the state machine parks in `:running` until the
-  worker reports back through `job_finished/2`. All interaction goes through
+  worker reports back through `job_finished/3`. All interaction goes through
   this module; nothing here messages a process that is not running.
 
       {:ok, _pid} = ObanClaude.Agent.start_agent("triage-7",
@@ -231,16 +231,25 @@ defmodule ObanClaude.Agent do
   The return path for workers: report a finished turn back to its agent.
 
   `ObanClaude.Agent.Job` calls this from `handle_result/2` /
-  `handle_error/3` with the `agent_id` it read off the job's meta. Payload
+  `handle_error/3` with the complete metadata captured by the job. Payload
   shapes: `{:ok, %ClaudeWrapper.Result{}}` on success, or
   `{:error, oban_return, payload}` for a failed turn. Fire-and-forget: if the
   agent is gone the outcome is dropped.
   """
-  @spec job_finished(agent_id(), {:ok, ClaudeWrapper.Result.t()} | {:error, term(), term()}) ::
-          :ok | {:error, :agent_not_running}
-  def job_finished(agent_id, payload) do
-    with_agent(agent_id, &:gen_statem.cast(&1, {:job_finished, payload}))
+  @spec job_finished(
+          agent_id(),
+          {:ok, ClaudeWrapper.Result.t()} | {:error, term(), term()},
+          map()
+        ) :: :ok | {:error, :agent_not_running | :turn_identity_required}
+  def job_finished(agent_id, payload, captured_meta) do
+    with_identity(agent_id, captured_meta, fn ->
+      with_agent(agent_id, &:gen_statem.cast(&1, {:job_finished, payload, captured_meta}))
+    end)
   end
+
+  @deprecated "pass the job metadata as the third argument"
+  @spec job_finished(agent_id(), term()) :: {:error, :turn_identity_required}
+  def job_finished(_agent_id, _payload), do: {:error, :turn_identity_required}
 
   @doc """
   The retry half of the return path: report a failed-but-retryable attempt.
@@ -251,12 +260,25 @@ defmodule ObanClaude.Agent do
   `{:retrying, retry}` in history, and re-arms the `:job_timeout` watchdog to
   cover the retry's backoff plus execution. `retry` is
   `%{attempt:, max_attempts:, verdict:}`. Fire-and-forget, like
-  `job_finished/2`.
+  `job_finished/3`.
   """
-  @spec job_retrying(agent_id(), map()) :: :ok | {:error, :agent_not_running}
-  def job_retrying(agent_id, retry) do
-    with_agent(agent_id, &:gen_statem.cast(&1, {:job_retrying, retry}))
+  @spec job_retrying(agent_id(), map(), map()) ::
+          :ok | {:error, :agent_not_running | :turn_identity_required}
+  def job_retrying(agent_id, retry, captured_meta) do
+    with_identity(agent_id, captured_meta, fn ->
+      with_agent(agent_id, &:gen_statem.cast(&1, {:job_retrying, retry, captured_meta}))
+    end)
   end
+
+  @deprecated "pass the job metadata as the third argument"
+  @spec job_retrying(agent_id(), map()) :: {:error, :turn_identity_required}
+  def job_retrying(_agent_id, _retry), do: {:error, :turn_identity_required}
+
+  defp with_identity(agent_id, %{"agent_id" => captured_id}, fun)
+       when captured_id === agent_id and is_function(fun, 0),
+       do: fun.()
+
+  defp with_identity(_agent_id, _captured_meta, _fun), do: {:error, :turn_identity_required}
 
   defp prompt_opts(opts) do
     session = Keyword.get(opts, :session, :resume)

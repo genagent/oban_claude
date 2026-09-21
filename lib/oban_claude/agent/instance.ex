@@ -6,12 +6,12 @@ defmodule ObanClaude.Agent.Instance do
   The process never blocks on claude: a prompt enqueues an `ObanClaude.Worker`
   job and the machine parks in `:running` until the worker's callbacks route
   the outcome back as a `{:job_finished, payload}` cast (via
-  `ObanClaude.Agent.job_finished/2`). States:
+  `ObanClaude.Agent.job_finished/3`). States:
 
     * `:idle` -- ready for a prompt
     * `:running` -- an Oban job is in flight; further prompts are `:postpone`d
       and a `:state_timeout` watchdog guards against a turn that never reports
-      back. A retryable failed attempt (`ObanClaude.Agent.job_retrying/2`)
+      back. A retryable failed attempt (`ObanClaude.Agent.job_retrying/3`)
       keeps the machine here and re-arms the watchdog, so `:job_timeout` should
       exceed one attempt's backoff plus its execution
     * `:waiting_for_user` -- the last turn asked a question (structured-output
@@ -115,6 +115,8 @@ defmodule ObanClaude.Agent.Instance do
       cost_usd: 0.0,
       pending_action: nil,
       pending_question: nil,
+      generation: identity_token(),
+      current_turn: nil,
       # set while an approve continuation is in flight: an approved turn that
       # fails or times out RE-GATES (the action was approved but not
       # completed) instead of falling to :idle with the elevation lost
@@ -171,7 +173,9 @@ defmodule ObanClaude.Agent.Instance do
   end
 
   # "Drops active scopes": a pending action, question, or in-flight approval
-  # does not survive the lockdown; after resume the operator starts clean.
+  # does not survive the lockdown; after resume the operator starts clean. An
+  # actually in-flight turn retains bookkeeping ownership so its matching
+  # outcome can still contribute history, spend, and a session without acting.
   defp process_event(state, :cast, :emergency_pause, data) when state != :paused do
     data = %{
       record(data, {:paused_from, state})
@@ -193,8 +197,8 @@ defmodule ObanClaude.Agent.Instance do
 
   # A turn that was in flight when the pause hit: absorb the payload (history,
   # session id, spend) but stay locked and ignore its directives.
-  defp process_event(:paused, :cast, {:job_finished, payload}, data) do
-    {:keep_state, absorb(data, payload)}
+  defp process_event(:paused, :cast, {:job_finished, payload, meta}, data) do
+    correlated_finish(:paused, data, payload, meta)
   end
 
   # A cast prompt has no caller to refuse, so lockdown drops it -- recorded, so
@@ -219,9 +223,10 @@ defmodule ObanClaude.Agent.Instance do
     start_turn(nil, text, prompt_data(data, opts))
   end
 
-  # A turn that outlived its watchdog: keep its payload, stay idle.
-  defp process_event(:idle, :cast, {:job_finished, payload}, data) do
-    {:keep_state, absorb(data, payload)}
+  # A turn that completed after pause/resume, but before another prompt took
+  # ownership, may still contribute bookkeeping without controlling state.
+  defp process_event(:idle, :cast, {:job_finished, payload, meta}, data) do
+    correlated_finish(:idle, data, payload, meta)
   end
 
   # ---------------------------------------------------------------------------
@@ -234,21 +239,28 @@ defmodule ObanClaude.Agent.Instance do
     {:keep_state_and_data, [:postpone]}
   end
 
-  defp process_event(:running, :cast, {:job_finished, payload}, data) do
-    finish_turn(data, payload)
+  defp process_event(:running, :cast, {:job_finished, payload, meta}, data) do
+    correlated_finish(:running, data, payload, meta)
   end
 
   # A retryable attempt failed and Oban will re-run the job: the turn is still
   # logically in flight, so stay :running, log it, and re-arm the watchdog to
   # cover the retry's backoff plus its execution.
-  defp process_event(:running, :cast, {:job_retrying, retry}, data) do
-    {:keep_state, record(data, {:retrying, retry}),
-     [{:state_timeout, data.config.job_timeout, :job_watchdog}]}
+  defp process_event(:running, :cast, {:job_retrying, retry, meta}, data) do
+    correlated_retry(data, retry, meta)
   end
 
-  defp process_event(:running, :state_timeout, :job_watchdog, data) do
-    Logger.warning("ObanClaude.Agent #{data.id}: job watchdog fired")
-    regate_or_idle(record(data, :watchdog_timeout), :watchdog_timeout)
+  defp process_event(:running, :state_timeout, {:job_watchdog, identity}, data) do
+    if owns_identity?(data, identity) do
+      Logger.warning("ObanClaude.Agent #{data.id}: job watchdog fired")
+
+      data
+      |> retire_turn()
+      |> record(:watchdog_timeout)
+      |> regate_or_idle(:watchdog_timeout)
+    else
+      {:keep_state, reject_callback(data, :watchdog, %{}, :stale_turn)}
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -265,11 +277,13 @@ defmodule ObanClaude.Agent.Instance do
   end
 
   defp process_event(:waiting_for_user, {:call, from}, {:user_prompt, answer, opts}, data) do
-    start_turn(from, answer, prompt_data(%{data | pending_question: nil}, opts))
+    candidate = prompt_data(%{data | pending_question: nil}, opts)
+    start_turn(from, answer, candidate, %{}, :waiting_for_user, data)
   end
 
   defp process_event(:waiting_for_user, :cast, {:user_prompt, answer, opts}, data) do
-    start_turn(nil, answer, prompt_data(%{data | pending_question: nil}, opts))
+    candidate = prompt_data(%{data | pending_question: nil}, opts)
+    start_turn(nil, answer, candidate, %{}, :waiting_for_user, data)
   end
 
   # ---------------------------------------------------------------------------
@@ -300,7 +314,14 @@ defmodule ObanClaude.Agent.Instance do
             in_flight_approval: %{description: description}
         }
 
-        start_turn(from, prompt, data, Map.merge(data.config.approved_args, args))
+        start_turn(
+          from,
+          prompt,
+          data,
+          Map.merge(data.config.approved_args, args),
+          :awaiting_permission,
+          %{data | pending_action: %{id: id, description: description}, in_flight_approval: nil}
+        )
 
       _ ->
         {:keep_state_and_data, [{:reply, from, {:error, :unknown_action}}]}
@@ -317,6 +338,16 @@ defmodule ObanClaude.Agent.Instance do
       _ ->
         {:keep_state_and_data, [{:reply, from, {:error, :unknown_action}}]}
     end
+  end
+
+  # Correlated callbacks are always inspected, even in a gated state, so a
+  # rejected delivery leaves a bounded diagnostic instead of disappearing.
+  defp process_event(state, :cast, {:job_finished, payload, meta}, data) do
+    correlated_finish(state, data, payload, meta)
+  end
+
+  defp process_event(state, :cast, {:job_retrying, retry, meta}, data) do
+    correlated_retry(state, data, retry, meta)
   end
 
   # ---------------------------------------------------------------------------
@@ -338,22 +369,34 @@ defmodule ObanClaude.Agent.Instance do
   # :approved_args), the prompt, and (from the second turn on) the resume
   # handle of the agent's claude session. `from` is nil on the cast path
   # (no caller to reply to).
-  defp start_turn(from, prompt, data, extra_args \\ %{}) do
+  defp start_turn(
+         from,
+         prompt,
+         data,
+         extra_args \\ %{},
+         fallback_state \\ :idle,
+         fallback_data \\ nil
+       ) do
+    fallback_data = fallback_data || data
+    turn_id = identity_token()
+
     args =
       data.config.args
       |> Map.merge(extra_args)
       |> Map.put("prompt", prompt)
       |> maybe_resume(data.session_id)
 
-    case enqueue(data, args) do
+    case enqueue(data, args, turn_id) do
       {:ok, _job} ->
-        watchdog = {:state_timeout, data.config.job_timeout, :job_watchdog}
+        current_turn = %{id: turn_id, retry_watermark: 0}
+        data = %{data | current_turn: current_turn}
+        watchdog = watchdog(data)
 
         {:next_state, :running, record(data, {:prompt, prompt}),
          reply(from, :processing) ++ [watchdog]}
 
       {:error, reason} ->
-        {:next_state, :idle, record(data, {:enqueue_failed, reason}),
+        {:next_state, fallback_state, record(fallback_data, {:enqueue_failed, reason}),
          reply(from, {:error, {:enqueue_failed, reason}})}
     end
   end
@@ -447,20 +490,203 @@ defmodule ObanClaude.Agent.Instance do
     end
   end
 
-  defp enqueue(%{config: %{enqueue_fun: fun}} = data, args) when is_function(fun, 2) do
-    fun.(args, job_meta(data))
+  defp enqueue(%{config: %{enqueue_fun: fun}} = data, args, turn_id) when is_function(fun, 2) do
+    fun.(args, job_meta(data, turn_id))
   end
 
-  defp enqueue(data, args) do
-    args
-    |> data.config.worker.new(meta: job_meta(data))
-    |> then(&Oban.insert(data.config.oban, &1))
+  defp enqueue(data, args, turn_id) do
+    meta = job_meta(data, turn_id)
+    changeset = data.config.worker.new(args, meta: meta)
+
+    with :ok <- reject_replacement(changeset) do
+      conf = Oban.config(data.config.oban)
+
+      Oban.Repo.transaction(
+        conf,
+        fn -> insert_and_validate(data.config.oban, changeset, meta, conf) end,
+        retry: false
+      )
+    end
+  end
+
+  defp insert_and_validate(oban, changeset, meta, conf) do
+    with {:ok, %Oban.Job{} = job} <- Oban.insert(oban, changeset),
+         :ok <- validate_inserted_job(job, meta) do
+      job
+    else
+      {:error, reason} -> Oban.Repo.rollback(conf, reason)
+    end
   end
 
   # Job meta identifies the turn for downstream telemetry consumers: whose
   # turn it is, and whether the conversational arc began with an operator
   # prompt or a scheduled tick.
-  defp job_meta(data), do: %{"agent_id" => data.id, "origin" => to_string(data.origin)}
+  defp job_meta(data, turn_id) do
+    %{
+      "agent_id" => data.id,
+      "agent_generation" => data.generation,
+      "agent_turn_id" => turn_id,
+      "origin" => to_string(data.origin)
+    }
+  end
+
+  defp reject_replacement(changeset) do
+    case Ecto.Changeset.get_field(changeset, :replace) do
+      nil -> :ok
+      [] -> :ok
+      _rules -> {:error, :agent_job_replacement_not_supported}
+    end
+  end
+
+  defp validate_inserted_job(%Oban.Job{conflict?: true}, _meta),
+    do: {:error, :agent_job_conflict}
+
+  defp validate_inserted_job(%Oban.Job{} = job, meta) do
+    cond do
+      not persisted_job?(job) -> {:error, :agent_job_not_persisted}
+      same_identity?(job.meta, meta) -> :ok
+      true -> {:error, :agent_job_identity_mismatch}
+    end
+  end
+
+  # Oban's public type promises an id, but an engine can violate that contract.
+  # Keep the runtime boundary defensive because an unpersisted uniqueness
+  # candidate must never become the current logical turn.
+  @dialyzer {:nowarn_function, persisted_job?: 1}
+  defp persisted_job?(job), do: is_integer(Map.get(job, :id))
+
+  defp correlated_finish(state, data, payload, meta) do
+    case identity_status(data, meta) do
+      :ok when state == :running ->
+        data
+        |> retire_turn()
+        |> finish_turn(payload)
+
+      :ok when state in [:paused, :idle] ->
+        data = data |> retire_turn() |> absorb(payload)
+        {:keep_state, data}
+
+      :ok ->
+        {:keep_state, reject_callback(data, :finished, meta, {:invalid_state, state})}
+
+      {:error, reason} ->
+        {:keep_state, reject_callback(data, :finished, meta, reason)}
+    end
+  end
+
+  defp correlated_retry(data, retry, meta), do: correlated_retry(:running, data, retry, meta)
+
+  defp correlated_retry(state, data, retry, meta) do
+    with :ok <- identity_status(data, meta),
+         :running <- state,
+         {:ok, watermark} <- retry_watermark(retry, meta),
+         true <- watermark > data.current_turn.retry_watermark do
+      current_turn = %{data.current_turn | retry_watermark: watermark}
+      data = %{record(data, {:retrying, retry}) | current_turn: current_turn}
+      {:keep_state, data, [watchdog(data)]}
+    else
+      {:error, reason} ->
+        {:keep_state, reject_callback(data, :retrying, meta, reason)}
+
+      false ->
+        {:keep_state, reject_callback(data, :retrying, meta, :retry_replayed)}
+
+      other_state when is_atom(other_state) ->
+        {:keep_state, reject_callback(data, :retrying, meta, {:control_disabled, other_state})}
+    end
+  end
+
+  defp retry_watermark(%{attempt: attempt}, meta) when is_integer(attempt) and attempt > 0 do
+    snoozed = Map.get(meta, "snoozed", 0)
+
+    if is_integer(snoozed) and snoozed >= 0 do
+      {:ok, attempt + snoozed}
+    else
+      {:error, :invalid_retry_watermark}
+    end
+  end
+
+  defp retry_watermark(_retry, _meta), do: {:error, :invalid_retry_watermark}
+
+  defp identity_status(data, meta) when is_map(meta) do
+    generation = Map.get(meta, "agent_generation")
+    turn_id = Map.get(meta, "agent_turn_id")
+
+    cond do
+      Map.get(meta, "agent_id") !== data.id ->
+        {:error, :agent_id_mismatch}
+
+      not valid_identity_token?(generation) or not valid_identity_token?(turn_id) ->
+        {:error, :malformed_identity}
+
+      generation != data.generation ->
+        {:error, :foreign_generation}
+
+      is_nil(data.current_turn) ->
+        {:error, :retired_turn}
+
+      turn_id != data.current_turn.id ->
+        {:error, :stale_turn}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp identity_status(_data, _meta), do: {:error, :malformed_identity}
+
+  defp same_identity?(left, right) do
+    Enum.all?(~w(agent_id agent_generation agent_turn_id), fn key ->
+      Map.get(left, key) === Map.get(right, key)
+    end)
+  end
+
+  defp valid_identity_token?(token), do: is_binary(token) and byte_size(token) > 0
+
+  defp retire_turn(data), do: %{data | current_turn: nil}
+
+  defp watchdog(data) do
+    identity = %{generation: data.generation, turn_id: data.current_turn.id}
+    {:state_timeout, data.config.job_timeout, {:job_watchdog, identity}}
+  end
+
+  defp owns_identity?(%{current_turn: nil}, _identity), do: false
+
+  defp owns_identity?(data, %{generation: generation, turn_id: turn_id}) do
+    generation == data.generation and turn_id == data.current_turn.id
+  end
+
+  defp owns_identity?(_data, _identity), do: false
+
+  defp reject_callback(data, kind, meta, reason) do
+    diagnostic = %{
+      generation: bounded_identity(Map.get(meta, "agent_generation")),
+      turn_id: bounded_identity(Map.get(meta, "agent_turn_id"))
+    }
+
+    :telemetry.execute(
+      [:oban_claude, :agent, :callback_rejected],
+      %{system_time: System.system_time()},
+      %{agent_id: data.id, kind: kind, reason: reason, identity: diagnostic}
+    )
+
+    record(data, {:callback_rejected, kind, reason, diagnostic})
+  end
+
+  defp bounded_identity(value) when is_binary(value),
+    do: binary_part(value, 0, min(128, byte_size(value)))
+
+  defp bounded_identity(value) do
+    value
+    |> inspect(limit: 5, printable_limit: 128)
+    |> bounded_identity()
+  end
+
+  defp identity_token do
+    16
+    |> :crypto.strong_rand_bytes()
+    |> Base.url_encode64(padding: false)
+  end
 
   defp maybe_resume(args, nil), do: args
   defp maybe_resume(args, session_id), do: Map.put(args, "resume", session_id)
