@@ -217,9 +217,14 @@ defmodule ObanClaude.Agent.TickTest do
 
     args = %{
       "agent_id" => id,
+      "arc_id" => "restored",
       "prompt" => "boot beat",
       "if_offline" => "start",
-      "start" => %{"args" => %{"model" => "haiku"}, "job_timeout" => 90_000}
+      "start" => %{
+        "args" => %{"model" => "haiku"},
+        "job_timeout" => 90_000,
+        "session_arcs" => %{"restored" => "seed-session"}
+      }
     }
 
     assert :ok = tick(args)
@@ -235,8 +240,10 @@ defmodule ObanClaude.Agent.TickTest do
         )
       )
 
-    assert %{"prompt" => "boot beat", "model" => "haiku"} = Jason.decode!(row.args)
-    assert %{"agent_id" => ^id} = Jason.decode!(row.meta)
+    assert %{"prompt" => "boot beat", "model" => "haiku", "resume" => "seed-session"} =
+             Jason.decode!(row.args)
+
+    assert %{"agent_id" => ^id, "arc_id" => "restored"} = Jason.decode!(row.meta)
   end
 
   test "session fresh delivers the beat without a resume handle" do
@@ -248,6 +255,28 @@ defmodule ObanClaude.Agent.TickTest do
     assert :ok = tick(%{"agent_id" => id, "prompt" => "beat", "session" => "fresh"})
     assert_receive {:enqueued, %{"prompt" => "beat"} = args, _meta}
     refute Map.has_key?(args, "resume")
+  end
+
+  test "a named fresh tick cannot replace another arc" do
+    id = start_agent!(session_arcs: %{"operator" => "operator-session", "sweep" => "old-sweep"})
+
+    assert :ok =
+             tick(%{
+               "agent_id" => id,
+               "arc_id" => "sweep",
+               "prompt" => "beat",
+               "session" => "fresh"
+             })
+
+    assert_receive {:enqueued, %{"prompt" => "beat"} = args,
+                    %{"arc_id" => "sweep", "continuation_decision" => "fresh"}}
+
+    refute Map.has_key?(args, "resume")
+    :ok = finish_captured(id, {:ok, result(result: "done", session_id: "new-sweep")})
+    assert {:ok, :idle} = Agent.await(id, :idle, 1_000)
+
+    :processing = Agent.submit_prompt(id, "operator", arc_id: "operator")
+    assert_receive {:enqueued, %{"resume" => "operator-session"}, %{"arc_id" => "operator"}}
   end
 
   test "a real Oban uniqueness conflict cannot transfer ownership" do
@@ -314,5 +343,10 @@ defmodule ObanClaude.Agent.TickTest do
              tick(%{"agent_id" => "a", "prompt" => "beat", "if_busy" => "wait"})
 
     assert reason =~ "if_busy"
+
+    assert {:cancel, {:invalid_tick, reason}} =
+             tick(%{"agent_id" => "a", "prompt" => "beat", "arc_id" => ""})
+
+    assert reason =~ "arc_id"
   end
 end

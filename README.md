@@ -326,10 +326,11 @@ atom, which it records as success.
 
 Everything above is one-shot: a job runs, a verdict lands. The **agent layer**
 is the stateful floor on top: one agent = one `:gen_statem` process whose
-turns run as ordinary `ObanClaude.Worker` jobs, with the claude session id
-threading turn to turn -- one persistent conversation that never blocks a
-process on claude. Opt-in (add `ObanClaude.Agent.Supervisor` to your tree and
-an `agents`/`ticks` queue pair); the core seam is untouched by it.
+turns run as ordinary `ObanClaude.Worker` jobs. Bounded, host-named
+conversation arcs retain independent Claude session handles for operator,
+scheduled, and task-specific work while the process remains
+single-turn-at-a-time. Opt-in (add `ObanClaude.Agent.Supervisor` to your tree
+and an `agents`/`ticks` queue pair); the core seam is untouched by it.
 
 ```elixir
 {:ok, _} = ObanClaude.Agent.start_agent("a1", args: %{"model" => "haiku"})

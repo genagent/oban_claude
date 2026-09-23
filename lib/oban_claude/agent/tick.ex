@@ -16,6 +16,7 @@ defmodule ObanClaude.Agent.Tick do
          {"0 9 * * *", ObanClaude.Agent.Tick,
           args: %{
             "agent_id" => "standup",
+            "arc_id" => "daily-sweep",
             "prompt" => "Summarize overnight CI failures.",
             "session" => "fresh",
             "if_offline" => "start",
@@ -27,6 +28,8 @@ defmodule ObanClaude.Agent.Tick do
 
     * `"agent_id"` (required) -- the agent to prompt.
     * `"prompt"` (required) -- the prompt to deliver.
+    * `"arc_id"` -- optional named conversation arc. Omission uses the
+      backward-compatible `"default"` arc.
     * `"if_busy"` -- what to do when the agent is not `:idle`:
       * `"skip"` (default) -- cancel this beat (`{:cancel, :agent_busy}`); a
         missed beat is better than a backlog of stale scheduled prompts.
@@ -37,7 +40,8 @@ defmodule ObanClaude.Agent.Tick do
       a restart):
       * `"skip"` (default) -- cancel this beat (`{:cancel, :agent_not_running}`).
       * `"start"` -- start the agent, then deliver. Config comes from the
-        optional `"start"` map -- `"args"`, `"approved_args"`, `"job_timeout"`
+        optional `"start"` map -- `"args"`, `"approved_args"`, `"job_timeout"`,
+        `"session_arcs"`, and `"max_session_arcs"`
         (the JSON-clean subset of `ObanClaude.Agent.Instance` config; a
         custom `:worker` or `:oban` needs the agent started by the host app
         instead). With `"start"` the crontab is effectively the agent's spec.
@@ -76,8 +80,12 @@ defmodule ObanClaude.Agent.Tick do
          {:ok, prompt} <- fetch(args, "prompt"),
          {:ok, if_busy} <- policy(args, "if_busy", ~w(skip queue)),
          {:ok, if_offline} <- policy(args, "if_offline", ~w(skip start)),
-         {:ok, session} <- policy(args, "session", ~w(resume fresh)) do
-      opts = [origin: :tick, session: %{"resume" => :resume, "fresh" => :fresh}[session]]
+         {:ok, session} <- policy(args, "session", ~w(resume fresh)),
+         {:ok, arc_id} <- optional_arc_id(args) do
+      opts =
+        [origin: :tick, session: %{"resume" => :resume, "fresh" => :fresh}[session]]
+        |> maybe_add_arc(arc_id)
+
       tick(agent_id, prompt, opts, if_busy, if_offline, args)
     end
   end
@@ -110,7 +118,9 @@ defmodule ObanClaude.Agent.Tick do
     config = [
       args: Map.get(start, "args", %{}),
       approved_args: Map.get(start, "approved_args", %{}),
-      job_timeout: Map.get(start, "job_timeout", 60_000)
+      job_timeout: Map.get(start, "job_timeout", 60_000),
+      session_arcs: Map.get(start, "session_arcs", %{}),
+      max_session_arcs: Map.get(start, "max_session_arcs", 32)
     ]
 
     case Agent.start_agent(agent_id, config) do
@@ -143,4 +153,15 @@ defmodule ObanClaude.Agent.Tick do
       {:cancel, {:invalid_tick, "unknown #{inspect(key)} #{inspect(value)}"}}
     end
   end
+
+  defp optional_arc_id(args) do
+    case Map.get(args, "arc_id") do
+      nil -> {:ok, nil}
+      arc_id when is_binary(arc_id) and byte_size(arc_id) in 1..256 -> {:ok, arc_id}
+      value -> {:cancel, {:invalid_tick, "invalid \"arc_id\" #{inspect(value)}"}}
+    end
+  end
+
+  defp maybe_add_arc(opts, nil), do: opts
+  defp maybe_add_arc(opts, arc_id), do: Keyword.put(opts, :arc_id, arc_id)
 end
