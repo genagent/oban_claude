@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/genagent/oban_claude/compare/v0.5.0...v0.5.1) (2026-09-23)
+
+
+### Bug Fixes
+
+* correlate agent callbacks with their owning turn and generation (closes [#124](https://github.com/genagent/oban_claude/issues/124)) ([#125](https://github.com/genagent/oban_claude/issues/125)) ([f1e1885](https://github.com/genagent/oban_claude/commit/f1e1885e3892e904657f37db64bcb36d3fc48cf0))
+
 ## [0.5.0](https://github.com/genagent/oban_claude/compare/v0.4.0...v0.5.0) (2026-09-20)
 
 
