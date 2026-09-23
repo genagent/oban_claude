@@ -4,8 +4,9 @@ The agent layer is the stateful floor above the stateless `ObanClaude` seam:
 **one agent = one `:gen_statem` process** whose conversational turns run as
 ordinary `ObanClaude.Worker` jobs. The process never blocks on claude -- a
 prompt enqueues a job and the machine parks until the worker's callbacks
-report back -- and the claude session id threads turn to turn, so one agent
-is one persistent conversation.
+report back. Provider sessions live in bounded, host-named conversation arcs,
+so one agent can keep an operator conversation separate from scheduled and
+task-specific work while remaining single-turn-at-a-time.
 
 It is opt-in: nothing runs unless `ObanClaude.Agent.Supervisor` is in your
 tree, and the core seam (`ObanClaude.run/2`, `ObanClaude.Worker`) is
@@ -89,10 +90,53 @@ interrupted work rather than starting over.
   * `cast_prompt/3` is fire-and-forget: never blocks the caller. For
     LiveView handlers, schedulers, anything that must not wait.
 
-Both take options: `session: :fresh` starts a new claude session for that
-turn (cleared at delivery time, so it composes with queued prompts);
-`origin: :tick` marks a scheduled delivery that must never be consumed as
-the answer to a pending question.
+Both take options: `arc_id: "issue-651"` selects an opaque conversation arc;
+omission uses the backward-compatible `"default"` arc. `session: :fresh`
+clears only the selected arc at delivery time. `session: :fresh_fallback`
+records that the host deliberately recovered from a failed resume.
+`origin: :tick` marks a scheduled delivery that must never be consumed as the
+answer to a pending question.
+
+## Conversation arcs
+
+Seed known provider handles when starting or restoring the process:
+
+    {:ok, _pid} =
+      ObanClaude.Agent.start_agent("caretaker",
+        session_arcs: %{
+          "operator" => persisted_operator_session,
+          "issue-651" => persisted_issue_session
+        },
+        max_session_arcs: 32
+      )
+
+    :processing =
+      ObanClaude.Agent.submit_prompt("caretaker", "continue the issue",
+        arc_id: "issue-651"
+      )
+
+Each job's metadata identifies `arc_id`, the input `session_id`, and its
+`continuation_decision` / `continuation_reason`. `info/1` returns
+`session_arcs`, `active_arc_id`, and the current or most recent
+`continuation`. A terminal resume classified as `:session_not_found`,
+`:invalid_session`, `:unknown_session`, or `:session_rejected` produces a
+typed `outcome: :session_rejected`. The host can then reconstruct a durable
+handoff and deliberately submit `session: :fresh_fallback`; no local
+transcript is selected implicitly.
+
+Claude can branch a retained session without changing its source arc:
+
+    :processing =
+      ObanClaude.Agent.fork_arc(
+        "caretaker",
+        "issue-651",
+        "issue-651-experiment",
+        "try the alternate design"
+      )
+
+The returned child session is stored under the target arc. Least-recently
+used inactive handles are evicted when `max_session_arcs` is reached. Arc
+persistence and rotation policy remain the host application's responsibility.
 
 ## Retries are one logical turn
 
@@ -121,6 +165,7 @@ worker layer) to the machine (which owns turn enqueueing): a beat delivers a
        {"0 9 * * *", ObanClaude.Agent.Tick,
         args: %{
           "agent_id" => "standup",
+          "arc_id" => "daily-sweep",
           "prompt" => "Summarize overnight CI failures.",
           "session" => "fresh",
           "if_offline" => "start",
@@ -142,12 +187,14 @@ very turn it should observe as busy, and skip-policy can never fire.
   * `await/3` -- block until the agent settles into given states; returns the
     full status payload. Registry-polling.
   * `list/0` -- every running agent as `{id, status}`, off the registry.
-  * `info/1` -- turn count, accumulated cost, session id, pendings (a call;
-    in-process, so it resets on restart -- durable ledgers are the app's job).
+  * `info/1` -- turn count, accumulated cost, default `session_id`, all retained
+    `session_arcs`, current/recent continuation, and pendings (a call;
+    in-process, so the host seeds persisted arcs after restart).
   * `history/1` -- the bounded event log (`:max_history`, default 500).
   * Telemetry: `[:oban_claude, :agent, :transition]` with
-    `%{agent_id, from, to}`, plus the run-level events documented in
-    `ObanClaude`.
+    `%{agent_id, from, to}`, and `[:oban_claude, :agent, :turn_completed]`
+    with the arc, session, continuation decision, and typed outcome, plus the
+    run-level events documented in `ObanClaude`.
 
 ## Testing without a queue or claude
 

@@ -33,10 +33,10 @@ defmodule ObanClaude.Agent.Instance do
   change also emits `[:oban_claude, :agent, :transition]` telemetry with
   `%{agent_id, from, to}` metadata (state atoms).
 
-  The claude session id is read off each turn's payload (including rail-stop
-  errors) and threaded into the next turn as `resume`, so one agent is one
-  persistent claude conversation. Turn count and accumulated cost ride in the
-  data (see `ObanClaude.Agent.info/1`).
+  Claude session ids are retained in bounded, host-named conversation arcs.
+  Prompts that omit an arc use `"default"`, preserving the original one-agent,
+  one-conversation behavior. Turn count and accumulated cost ride in the data
+  (see `ObanClaude.Agent.info/1`).
 
   ## Config
 
@@ -54,6 +54,11 @@ defmodule ObanClaude.Agent.Instance do
     * `:job_timeout` -- the `:running` watchdog in milliseconds; default 60000
     * `:max_history` -- cap on retained history entries (newest win); default
       500, so an always-on agent's event log cannot grow without bound
+    * `:session_arcs` -- optional `%{arc_id => session_id}` seed map for
+      restoring provider conversations after this process restarts; default
+      `%{}`
+    * `:max_session_arcs` -- maximum retained provider handles; least-recently
+      used inactive arcs are evicted as new ones arrive; default 32
     * `:enqueue_fun` -- a 2-arity `(args, meta) -> {:ok, term} | {:error, term}`
       override of the enqueue itself, for tests (no Oban, no DB)
   """
@@ -61,6 +66,7 @@ defmodule ObanClaude.Agent.Instance do
   @behaviour :gen_statem
 
   alias ClaudeWrapper.Result
+  alias ObanClaude.Agent.SessionArcs
 
   require Logger
 
@@ -75,7 +81,9 @@ defmodule ObanClaude.Agent.Instance do
     job_timeout: 60_000,
     # History is an in-process event log; an always-on agent must not grow it
     # without bound. Newest entries win; the cap is per-entry, not per-turn.
-    max_history: 500
+    max_history: 500,
+    session_arcs: %{},
+    max_session_arcs: 32
   }
 
   def child_spec({agent_id, config}) do
@@ -105,12 +113,13 @@ defmodule ObanClaude.Agent.Instance do
     config = Map.merge(@defaults, Map.new(config))
     validate_string_keys!(:args, config.args)
     validate_string_keys!(:approved_args, config.approved_args)
+    arcs = SessionArcs.new(config.session_arcs, config.max_session_arcs)
 
     data = %{
       id: agent_id,
       config: config,
       history: [],
-      session_id: nil,
+      arcs: arcs,
       turns: 0,
       cost_usd: 0.0,
       pending_action: nil,
@@ -125,7 +134,11 @@ defmodule ObanClaude.Agent.Instance do
       # stamped into every enqueued job's meta so downstream consumers
       # (feeds, dashboards) can tell an operator's question from scheduled
       # work. Approve/reject continuations inherit the arc's origin.
-      origin: :tick
+      origin: :tick,
+      active_arc_id: "default",
+      continuation_request: :resume,
+      fork_from_arc_id: nil,
+      last_continuation: nil
     }
 
     {:ok, :idle, data}
@@ -162,7 +175,10 @@ defmodule ObanClaude.Agent.Instance do
     info = %{
       id: data.id,
       state: state,
-      session_id: data.session_id,
+      session_id: SessionArcs.session(data.arcs, "default"),
+      session_arcs: SessionArcs.sessions(data.arcs),
+      active_arc_id: data.active_arc_id,
+      continuation: current_or_last_continuation(data),
       turns: data.turns,
       cost_usd: data.cost_usd,
       pending_action: data.pending_action,
@@ -216,11 +232,11 @@ defmodule ObanClaude.Agent.Instance do
   # ---------------------------------------------------------------------------
 
   defp process_event(:idle, {:call, from}, {:user_prompt, text, opts}, data) do
-    start_turn(from, text, prompt_data(data, opts))
+    start_turn(from, text, prompt_data(data, opts, "default"))
   end
 
   defp process_event(:idle, :cast, {:user_prompt, text, opts}, data) do
-    start_turn(nil, text, prompt_data(data, opts))
+    start_turn(nil, text, prompt_data(data, opts, "default"))
   end
 
   # A turn that completed after pause/resume, but before another prompt took
@@ -255,6 +271,7 @@ defmodule ObanClaude.Agent.Instance do
       Logger.warning("ObanClaude.Agent #{data.id}: job watchdog fired")
 
       data
+      |> complete_watchdog()
       |> retire_turn()
       |> record(:watchdog_timeout)
       |> regate_or_idle(:watchdog_timeout)
@@ -276,13 +293,23 @@ defmodule ObanClaude.Agent.Instance do
     {:keep_state_and_data, [:postpone]}
   end
 
+  defp process_event(
+         :waiting_for_user,
+         _type,
+         {:user_prompt, _text, %{fork_from: fork_from}},
+         _data
+       )
+       when is_binary(fork_from) do
+    {:keep_state_and_data, [:postpone]}
+  end
+
   defp process_event(:waiting_for_user, {:call, from}, {:user_prompt, answer, opts}, data) do
-    candidate = prompt_data(%{data | pending_question: nil}, opts)
+    candidate = prompt_data(%{data | pending_question: nil}, opts, data.active_arc_id)
     start_turn(from, answer, candidate, %{}, :waiting_for_user, data)
   end
 
   defp process_event(:waiting_for_user, :cast, {:user_prompt, answer, opts}, data) do
-    candidate = prompt_data(%{data | pending_question: nil}, opts)
+    candidate = prompt_data(%{data | pending_question: nil}, opts, data.active_arc_id)
     start_turn(nil, answer, candidate, %{}, :waiting_for_user, data)
   end
 
@@ -364,11 +391,9 @@ defmodule ObanClaude.Agent.Instance do
   # turns
   # ---------------------------------------------------------------------------
 
-  # Enqueue one claude turn and park in :running under the watchdog. The args
-  # are the config defaults, any per-turn extras (approve continuations carry
-  # :approved_args), the prompt, and (from the second turn on) the resume
-  # handle of the agent's claude session. `from` is nil on the cast path
-  # (no caller to reply to).
+  # Enqueue one Claude turn and park in :running under the watchdog. The
+  # selected arc supplies the only resume handle that may be used. `from` is
+  # nil on the cast path (no caller to reply to).
   defp start_turn(
          from,
          prompt,
@@ -380,22 +405,24 @@ defmodule ObanClaude.Agent.Instance do
     fallback_data = fallback_data || data
     turn_id = identity_token()
 
-    args =
+    base_args =
       data.config.args
       |> Map.merge(extra_args)
       |> Map.put("prompt", prompt)
-      |> maybe_resume(data.session_id)
 
-    case enqueue(data, args, turn_id) do
-      {:ok, _job} ->
-        current_turn = %{id: turn_id, retry_watermark: 0}
-        data = %{data | current_turn: current_turn}
-        watchdog = watchdog(data)
+    with {:ok, continuation, args} <- continuation_args(data, base_args),
+         {:ok, _job} <- enqueue(data, args, turn_id, continuation) do
+      current_turn = %{id: turn_id, retry_watermark: 0, continuation: continuation}
+      data = %{data | current_turn: current_turn, last_continuation: continuation}
+      watchdog = watchdog(data)
 
-        {:next_state, :running, record(data, {:prompt, prompt}),
-         reply(from, :processing) ++ [watchdog]}
-
+      {:next_state, :running, record(data, {:prompt, prompt}),
+       reply(from, :processing) ++ [watchdog]}
+    else
       {:error, reason} ->
+        failed = continuation_failure(data, reason, :enqueue_failed)
+        fallback_data = %{fallback_data | last_continuation: failed}
+
         {:next_state, fallback_state, record(fallback_data, {:enqueue_failed, reason}),
          reply(from, {:error, {:enqueue_failed, reason}})}
     end
@@ -404,22 +431,39 @@ defmodule ObanClaude.Agent.Instance do
   defp reply(nil, _message), do: []
   defp reply(from, message), do: [{:reply, from, message}]
 
-  # `session: :fresh` clears the resume handle at delivery time (not at send
-  # time), so it composes correctly with postponed prompts: the turn that
-  # finally runs starts a new claude session, and its result seeds the new
-  # session id.
-  defp prompt_data(data, %{session: :fresh} = opts) do
-    %{data | session_id: nil, origin: Map.get(opts, :origin, :operator)}
-  end
+  # Freshness is applied at delivery time, so postponed prompts clear only
+  # their selected arc immediately before enqueue.
+  defp prompt_data(data, opts, fallback_arc_id) do
+    arc_id = Map.get(opts, :arc_id) || fallback_arc_id
+    request = Map.fetch!(opts, :session)
 
-  defp prompt_data(data, opts) do
-    %{data | origin: Map.get(opts, :origin, :operator)}
+    arcs =
+      case request do
+        mode when mode in [:fresh, :fresh_fallback] -> SessionArcs.clear(data.arcs, arc_id)
+        :resume -> SessionArcs.touch(data.arcs, arc_id)
+      end
+
+    arcs =
+      case Map.get(opts, :fork_from) do
+        fork_from when is_binary(fork_from) -> SessionArcs.touch(arcs, fork_from)
+        nil -> arcs
+      end
+
+    %{
+      data
+      | arcs: arcs,
+        active_arc_id: arc_id,
+        continuation_request: request,
+        fork_from_arc_id: Map.get(opts, :fork_from),
+        origin: Map.get(opts, :origin, :operator)
+    }
   end
 
   # Route on the finished turn's structured-output directive. A completed
   # approve continuation resolves its approval, whatever it returns.
   defp finish_turn(data, {:ok, %Result{} = result} = payload) do
-    data = %{absorb(data, payload) | in_flight_approval: nil}
+    data = %{complete_turn(data, payload) | in_flight_approval: nil}
+    data = retire_turn(data)
 
     case directive(result) do
       {:ask_user, question} ->
@@ -435,7 +479,8 @@ defmodule ObanClaude.Agent.Instance do
   end
 
   defp finish_turn(data, {:error, verdict, _payload} = failure) do
-    regate_or_idle(absorb(data, failure), verdict)
+    data = data |> complete_turn(failure) |> retire_turn()
+    regate_or_idle(data, verdict)
   end
 
   # An approved turn that did not complete (failed verdict, watchdog) re-gates:
@@ -461,21 +506,25 @@ defmodule ObanClaude.Agent.Instance do
     data
     |> record({:result, ObanClaude.structured(result) || result.result})
     |> count_turn(result.cost_usd)
-    |> keep_session(result.session_id)
+    |> keep_session(result.session_id, data.current_turn.continuation.arc_id)
   end
 
   defp absorb(data, {:error, verdict, payload}) do
     data
     |> record({:job_error, verdict})
     |> count_turn(ObanClaude.cost_usd(payload))
-    |> keep_session(ObanClaude.session_id(payload))
+    |> keep_session(ObanClaude.session_id(payload), data.current_turn.continuation.arc_id)
   end
 
   defp count_turn(data, cost) do
     %{data | turns: data.turns + 1, cost_usd: data.cost_usd + (cost || 0.0)}
   end
 
-  defp keep_session(data, session_id), do: %{data | session_id: session_id || data.session_id}
+  defp keep_session(data, nil, _arc_id), do: data
+
+  defp keep_session(data, session_id, arc_id) do
+    %{data | arcs: SessionArcs.put(data.arcs, arc_id, session_id)}
+  end
 
   defp directive(result) do
     case ObanClaude.structured(result) do
@@ -490,12 +539,13 @@ defmodule ObanClaude.Agent.Instance do
     end
   end
 
-  defp enqueue(%{config: %{enqueue_fun: fun}} = data, args, turn_id) when is_function(fun, 2) do
-    fun.(args, job_meta(data, turn_id))
+  defp enqueue(%{config: %{enqueue_fun: fun}} = data, args, turn_id, continuation)
+       when is_function(fun, 2) do
+    fun.(args, job_meta(data, turn_id, continuation))
   end
 
-  defp enqueue(data, args, turn_id) do
-    meta = job_meta(data, turn_id)
+  defp enqueue(data, args, turn_id, continuation) do
+    meta = job_meta(data, turn_id, continuation)
     changeset = data.config.worker.new(args, meta: meta)
 
     with :ok <- reject_replacement(changeset) do
@@ -521,13 +571,18 @@ defmodule ObanClaude.Agent.Instance do
   # Job meta identifies the turn for downstream telemetry consumers: whose
   # turn it is, and whether the conversational arc began with an operator
   # prompt or a scheduled tick.
-  defp job_meta(data, turn_id) do
+  defp job_meta(data, turn_id, continuation) do
     %{
       "agent_id" => data.id,
       "agent_generation" => data.generation,
       "agent_turn_id" => turn_id,
-      "origin" => to_string(data.origin)
+      "origin" => to_string(data.origin),
+      "arc_id" => continuation.arc_id,
+      "continuation_decision" => to_string(continuation.decision),
+      "continuation_reason" => to_string(continuation.reason)
     }
+    |> maybe_put_meta("session_id", continuation.session_id)
+    |> maybe_put_meta("fork_from_arc_id", continuation.fork_from_arc_id)
   end
 
   defp reject_replacement(changeset) do
@@ -558,12 +613,10 @@ defmodule ObanClaude.Agent.Instance do
   defp correlated_finish(state, data, payload, meta) do
     case identity_status(data, meta) do
       :ok when state == :running ->
-        data
-        |> retire_turn()
-        |> finish_turn(payload)
+        finish_turn(data, payload)
 
       :ok when state in [:paused, :idle] ->
-        data = data |> retire_turn() |> absorb(payload)
+        data = data |> complete_turn(payload) |> retire_turn()
         {:keep_state, data}
 
       :ok ->
@@ -688,8 +741,160 @@ defmodule ObanClaude.Agent.Instance do
     |> Base.url_encode64(padding: false)
   end
 
-  defp maybe_resume(args, nil), do: args
-  defp maybe_resume(args, session_id), do: Map.put(args, "resume", session_id)
+  defp continuation_args(data, args) do
+    args = Map.drop(args, ["resume", "session_id", "fork_session"])
+    arc_id = data.active_arc_id
+
+    case data.fork_from_arc_id do
+      fork_from when is_binary(fork_from) ->
+        case SessionArcs.session(data.arcs, fork_from) do
+          nil ->
+            {:error, {:unknown_arc, fork_from}}
+
+          session_id ->
+            continuation =
+              continuation(data, :resume, :fork, session_id, fork_from_arc_id: fork_from)
+
+            args = args |> Map.put("resume", session_id) |> Map.put("fork_session", true)
+            {:ok, continuation, args}
+        end
+
+      nil ->
+        session_id = SessionArcs.session(data.arcs, arc_id)
+
+        case {data.continuation_request, session_id} do
+          {:resume, nil} ->
+            {:ok, continuation(data, :fresh, :no_session, nil), args}
+
+          {:resume, session_id} ->
+            {:ok, continuation(data, :resume, :session_available, session_id),
+             Map.put(args, "resume", session_id)}
+
+          {:fresh, nil} ->
+            {:ok, continuation(data, :fresh, :requested, nil), args}
+
+          {:fresh_fallback, nil} ->
+            {:ok, continuation(data, :fresh_fallback, :resume_failed, nil), args}
+        end
+    end
+  end
+
+  defp continuation(data, decision, reason, session_id, opts \\ []) do
+    %{
+      arc_id: data.active_arc_id,
+      decision: decision,
+      reason: reason,
+      session_id: session_id,
+      result_session_id: nil,
+      fork_from_arc_id: Keyword.get(opts, :fork_from_arc_id),
+      origin: data.origin,
+      outcome: :running,
+      outcome_reason: nil
+    }
+  end
+
+  defp continuation_failure(data, reason, outcome) do
+    session_id = SessionArcs.session(data.arcs, data.active_arc_id)
+
+    data
+    |> continuation(
+      failure_decision(data, session_id),
+      failure_reason(data, session_id),
+      session_id,
+      fork_from_arc_id: data.fork_from_arc_id
+    )
+    |> Map.merge(%{outcome: outcome, outcome_reason: reason})
+  end
+
+  defp failure_decision(%{fork_from_arc_id: fork_from}, _session_id) when is_binary(fork_from),
+    do: :resume
+
+  defp failure_decision(%{continuation_request: :fresh_fallback}, _session_id),
+    do: :fresh_fallback
+
+  defp failure_decision(%{continuation_request: :fresh}, _session_id), do: :fresh
+  defp failure_decision(_data, nil), do: :fresh
+  defp failure_decision(_data, _session_id), do: :resume
+
+  defp failure_reason(%{fork_from_arc_id: fork_from}, _session_id) when is_binary(fork_from),
+    do: :fork
+
+  defp failure_reason(%{continuation_request: :fresh_fallback}, _session_id), do: :resume_failed
+  defp failure_reason(%{continuation_request: :fresh}, _session_id), do: :requested
+  defp failure_reason(_data, nil), do: :no_session
+  defp failure_reason(_data, _session_id), do: :session_available
+
+  defp complete_turn(data, payload) do
+    data = absorb(data, payload)
+    continuation = completed_continuation(data, payload)
+    emit_completion(data, continuation)
+    %{data | last_continuation: continuation}
+  end
+
+  defp complete_watchdog(data) do
+    continuation =
+      data.current_turn.continuation
+      |> Map.merge(%{outcome: :timed_out, outcome_reason: :watchdog_timeout})
+
+    emit_completion(data, continuation)
+    %{data | last_continuation: continuation}
+  end
+
+  defp completed_continuation(data, payload) do
+    {outcome, reason} = completion_outcome(payload)
+    arc_id = data.current_turn.continuation.arc_id
+
+    data.current_turn.continuation
+    |> Map.merge(%{
+      outcome: outcome,
+      outcome_reason: reason,
+      result_session_id: SessionArcs.session(data.arcs, arc_id)
+    })
+  end
+
+  defp completion_outcome({:ok, %Result{}}), do: {:completed, nil}
+
+  defp completion_outcome({:error, verdict, payload}) do
+    if session_rejected?(verdict) or session_rejected?(payload) do
+      {:session_rejected, verdict}
+    else
+      {:failed, verdict}
+    end
+  end
+
+  defp session_rejected?(value)
+       when value in [:session_not_found, :invalid_session, :unknown_session, :session_rejected],
+       do: true
+
+  defp session_rejected?({tag, value}) when tag in [:cancel, :error],
+    do: session_rejected?(value)
+
+  defp session_rejected?(%{reason: reason}), do: session_rejected?(reason)
+  defp session_rejected?(_other), do: false
+
+  defp emit_completion(data, continuation) do
+    :telemetry.execute(
+      [:oban_claude, :agent, :turn_completed],
+      %{system_time: System.system_time()},
+      %{
+        agent_id: data.id,
+        arc_id: continuation.arc_id,
+        session_id: continuation.result_session_id || continuation.session_id,
+        continuation_decision: continuation.decision,
+        continuation_reason: continuation.reason,
+        outcome: continuation.outcome,
+        outcome_reason: continuation.outcome_reason
+      }
+    )
+  end
+
+  defp current_or_last_continuation(%{current_turn: %{continuation: continuation}}),
+    do: continuation
+
+  defp current_or_last_continuation(data), do: data.last_continuation
+
+  defp maybe_put_meta(meta, _key, nil), do: meta
+  defp maybe_put_meta(meta, key, value), do: Map.put(meta, key, value)
 
   defp action_id, do: "act_" <> Integer.to_string(System.unique_integer([:positive]))
 
