@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/genagent/oban_claude/compare/v0.5.1...v0.6.0) (2026-09-23)
+
+
+### Features
+
+* add named session arcs ([#129](https://github.com/genagent/oban_claude/issues/129)) ([f4a5491](https://github.com/genagent/oban_claude/commit/f4a54914bcac3a33c441da382c556150dac3ebda))
+
 ## [0.5.1](https://github.com/genagent/oban_claude/compare/v0.5.0...v0.5.1) (2026-09-23)
 
 
