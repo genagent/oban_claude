@@ -35,7 +35,7 @@ them together live elsewhere.
 ## Conventions
 
 - Elixir `~> 1.20`, OTP 29. `claude_wrapper` is a Hex dependency, pinned to the
-  `~> 0.13.0` line: this library hardcodes its contract (`@passthrough` keys, the
+  `~> 0.14.0` line: this library hardcodes its contract (`@passthrough` keys, the
   permission_mode/effort/hermetic vocabularies, the `Outcome` error kinds), so
   bump it deliberately per wrapper release and re-verify those lists.
 - Run `mix format`, `mix compile --warnings-as-errors`, `mix credo --strict`, `mix docs --warnings-as-errors`, `mix test`, and `mix dialyzer` before every push; CI runs the same.
