@@ -26,7 +26,7 @@ defmodule ObanClaude.CLI.Doctor do
 
     checks = [
       {"claude binary + version", ClaudeWrapper.version()},
-      {"authentication", ClaudeWrapper.auth_status()}
+      {"authentication", auth_check(ClaudeWrapper.auth_status())}
     ]
 
     {text, ok?} = report(checks)
@@ -39,6 +39,22 @@ defmodule ObanClaude.CLI.Doctor do
 
     if ok?, do: :ok, else: {:error, :run_failed}
   end
+
+  @doc false
+  # Interprets `ClaudeWrapper.auth_status/0` for the gate: `{:ok, _}` only when the
+  # status says logged in. Pure, so it is testable without a claude binary.
+  @spec auth_check({:ok, term()} | {:error, term()}) :: {:ok, term()} | {:error, term()}
+  def auth_check({:ok, %{logged_in: true} = info}), do: {:ok, info}
+
+  # Temporary fallback for genagent/claude_wrapper_ex#252: claude CLI 2.1.273
+  # emits camelCase (`loggedIn`) and claude_wrapper 0.14.0 reads snake_case, so
+  # the typed `logged_in` is false on a logged-in machine. Remove this clause
+  # when the wrapper dependency is bumped to a release with the fix.
+  def auth_check({:ok, %{extra: %{"loggedIn" => true}} = info}), do: {:ok, info}
+
+  def auth_check({:ok, info}) when is_map(info), do: {:error, {:not_logged_in, info}}
+  def auth_check({:ok, raw}), do: {:error, {:auth_status_unknown, raw}}
+  def auth_check({:error, _reason} = error), do: error
 
   @doc false
   # A list of `{label, {:ok, info} | {:error, reason}}` -> `{report_text, ok?}`.
