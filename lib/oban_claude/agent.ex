@@ -26,6 +26,9 @@ defmodule ObanClaude.Agent do
         ObanClaude.Agent.await("triage-7", [:idle, :awaiting_permission, :waiting_for_user])
       :processing = ObanClaude.Agent.approve_action("triage-7", id)
 
+  Action ids are opaque strings: compare them for equality only, and do not
+  parse them or assume a format. They are unique across VM restarts.
+
   Requires `ObanClaude.Agent.Supervisor` in the host supervision tree.
   """
 

@@ -107,6 +107,14 @@ defmodule ObanClaude.Agent.Instance do
     )
   end
 
+  # The pure half of action id generation, public only so a test can feed it
+  # chosen entropy. Callers get ids from the gated states, never from here.
+  @doc false
+  @spec build_action_id(binary()) :: String.t()
+  def build_action_id(entropy) when is_binary(entropy) do
+    "act_" <> Base.url_encode64(entropy, padding: false)
+  end
+
   @impl :gen_statem
   def callback_mode, do: :handle_event_function
 
@@ -948,7 +956,10 @@ defmodule ObanClaude.Agent.Instance do
   defp maybe_put_meta(meta, _key, nil), do: meta
   defp maybe_put_meta(meta, key, value), do: Map.put(meta, key, value)
 
-  defp action_id, do: "act_" <> Integer.to_string(System.unique_integer([:positive]))
+  # Random, not System.unique_integer/1: that counter restarts with the VM, so
+  # after a restart a durable downstream gate record could share an id with a
+  # fresh live gate (#131). 16 random bytes make a collision negligible.
+  defp action_id, do: build_action_id(:crypto.strong_rand_bytes(16))
 
   defp record(data, entry) do
     %{data | history: Enum.take([entry | data.history], data.config.max_history)}
