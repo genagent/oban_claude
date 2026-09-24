@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/genagent/oban_claude/compare/v0.6.1...v0.7.0) (2026-09-24)
+
+
+### Features
+
+* preserve application correlation through agent turns (closes [#135](https://github.com/genagent/oban_claude/issues/135)) ([#136](https://github.com/genagent/oban_claude/issues/136)) ([a618817](https://github.com/genagent/oban_claude/commit/a61881771209eded27ab1453fc9ed3affd1919c7))
+
 ## [0.6.1](https://github.com/genagent/oban_claude/compare/v0.6.0...v0.6.1) (2026-09-24)
 
 
