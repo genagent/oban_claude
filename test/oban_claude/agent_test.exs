@@ -8,6 +8,7 @@ defmodule ObanClaude.AgentTest do
   import ObanClaude.Testing
 
   alias ObanClaude.Agent
+  alias ObanClaude.Agent.Instance
 
   setup do
     start_supervised!(ObanClaude.Agent.Supervisor)
@@ -886,6 +887,71 @@ defmodule ObanClaude.AgentTest do
       assert :processing = Task.await(caller)
       assert_receive {:enqueued, %{"prompt" => "next thing"}, _meta}
       assert {:ok, :running} = Agent.status(id)
+    end
+  end
+
+  describe "action ids" do
+    # One full gate cycle without polling: settle/1 orders the read behind the
+    # job_finished cast, and the rejection returns the agent to :idle.
+    defp gate_and_reject!(id) do
+      :processing = Agent.submit_prompt(id, "plan a refactor")
+      assert_receive {:enqueued, _args, _meta}
+
+      turn =
+        structured_result(
+          %{"directive" => "request_permission", "action" => "rewrite lib/core.ex"},
+          session_id: "sess-ids"
+        )
+
+      :ok = finish_captured(id, {:ok, turn})
+      settle(id)
+
+      {:ok, {:awaiting_permission, %{id: action_id}}} = Agent.status(id)
+      :rejected = Agent.reject_action(id, action_id, "next")
+      action_id
+    end
+
+    test "two generator lifetimes never share an id (#131)" do
+      # A VM-local counter restarts with the VM, so the first gate of two
+      # lifetimes would both read "act_1". Entropy is fresh per lifetime, so
+      # the same position in each lifetime yields a different id.
+      positions = 1..50
+      lifetime_1 = for p <- positions, do: Instance.build_action_id(<<1::64, p::64>>)
+      lifetime_2 = for p <- positions, do: Instance.build_action_id(<<2::64, p::64>>)
+
+      assert length(Enum.uniq(lifetime_1 ++ lifetime_2)) == 100
+      assert MapSet.disjoint?(MapSet.new(lifetime_1), MapSet.new(lifetime_2))
+    end
+
+    test "the builder is a pure function of its entropy, not of System.unique_integer" do
+      entropy = :binary.copy(<<7>>, 16)
+      first = Instance.build_action_id(entropy)
+
+      _ = System.unique_integer([:positive])
+
+      assert Instance.build_action_id(entropy) == first
+      assert first == "act_" <> Base.url_encode64(entropy, padding: false)
+    end
+
+    test "a live gate's id is act_ plus 16 random bytes, not a counter" do
+      id = start_agent!()
+      action_id = gate_and_reject!(id)
+
+      assert action_id =~ ~r/^act_[A-Za-z0-9_-]+$/
+      refute action_id == "act_" <> Integer.to_string(System.unique_integer([:positive]))
+
+      "act_" <> suffix = action_id
+      assert {:ok, bytes} = Base.url_decode64(suffix, padding: false)
+      assert byte_size(bytes) == 16
+    end
+
+    test "1000 gates in one process yield 1000 distinct ids" do
+      id = start_agent!()
+
+      ids = for _ <- 1..1_000, do: gate_and_reject!(id)
+
+      assert length(Enum.uniq(ids)) == 1_000
+      assert Enum.all?(ids, &String.starts_with?(&1, "act_"))
     end
   end
 
