@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/genagent/oban_claude/compare/v0.6.0...v0.6.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* contain enqueue failures without terminating the agent ([#133](https://github.com/genagent/oban_claude/issues/133)) ([bbffdd3](https://github.com/genagent/oban_claude/commit/bbffdd32d2535e30fc4fbca5be01c612d1c00267))
+
 ## [0.6.0](https://github.com/genagent/oban_claude/compare/v0.5.1...v0.6.0) (2026-09-23)
 
 
