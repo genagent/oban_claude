@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.1](https://github.com/genagent/oban_claude/compare/v0.7.0...v0.7.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* gate doctor on auth login state (closes [#138](https://github.com/genagent/oban_claude/issues/138)) ([#142](https://github.com/genagent/oban_claude/issues/142)) ([15eb11f](https://github.com/genagent/oban_claude/commit/15eb11f0605e54fe72021c35a7e302ab9c0ac338))
+* make agent action ids restart-safe (closes [#131](https://github.com/genagent/oban_claude/issues/131)) ([#140](https://github.com/genagent/oban_claude/issues/140)) ([c0a0602](https://github.com/genagent/oban_claude/commit/c0a060284278cc3eb6183e273a9c7d2530087c5b))
+
 ## [0.7.0](https://github.com/genagent/oban_claude/compare/v0.6.1...v0.7.0) (2026-09-24)
 
 
