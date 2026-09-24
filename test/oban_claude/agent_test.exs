@@ -50,6 +50,10 @@ defmodule ObanClaude.AgentTest do
     Agent.job_retrying(id, retry, meta)
   end
 
+  defp fail_turn_start(:raise), do: raise("turn start failed")
+  defp fail_turn_start(:throw), do: throw(:turn_start_failed)
+  defp fail_turn_start(:exit), do: exit(:turn_start_failed)
+
   describe "registry status reads" do
     test "a started agent reads :idle without messaging the process" do
       id = start_agent!()
@@ -118,6 +122,23 @@ defmodule ObanClaude.AgentTest do
 
       assert {:error, {:enqueue_failed, :db_down}} = Agent.submit_prompt(id, "go")
       assert {:ok, :idle} = Agent.status(id)
+    end
+
+    test "unexpected enqueue failures leave the agent alive and idle" do
+      for {kind, reason} <- [
+            raise: :turn_start_exception,
+            throw: :turn_start_throw,
+            exit: :turn_start_exit
+          ] do
+        id = "agent-#{kind}-" <> Integer.to_string(System.unique_integer([:positive]))
+
+        {:ok, pid} =
+          Agent.start_agent(id, enqueue_fun: fn _args, _meta -> fail_turn_start(kind) end)
+
+        assert {:error, {:enqueue_failed, ^reason}} = Agent.submit_prompt(id, "go")
+        assert Process.alive?(pid)
+        assert {:ok, :idle} = Agent.status(id)
+      end
     end
   end
 
@@ -237,6 +258,32 @@ defmodule ObanClaude.AgentTest do
       {:ok, :idle} = Agent.await(id, :idle, 1_000)
       :processing = Agent.submit_prompt(id, "three")
       assert_receive {:enqueued, %{"prompt" => "three", "resume" => "sess-2"}, _meta}
+    end
+
+    test "approval resumes the session produced by a fresh turn" do
+      id = start_agent!()
+      :processing = Agent.submit_prompt(id, "plan", session: :fresh)
+      assert_receive {:enqueued, %{"prompt" => "plan"} = args, _meta}
+      refute Map.has_key?(args, "resume")
+
+      request =
+        structured_result(%{"directive" => "request_permission", "action" => "deploy"},
+          session_id: "fresh-session"
+        )
+
+      :ok = finish_captured(id, {:ok, request})
+
+      assert {:ok, {:awaiting_permission, action}} =
+               Agent.await(id, :awaiting_permission, 1_000)
+
+      :processing = Agent.approve_action(id, action.id)
+
+      assert_receive {:enqueued,
+                      %{"prompt" => "Approved: deploy. Proceed.", "resume" => "fresh-session"},
+                      _meta}
+
+      :ok = finish_captured(id, {:ok, result(result: "deployed", session_id: "fresh-session")})
+      assert {:ok, :idle} = Agent.await(id, :idle, 1_000)
     end
 
     test "a tick-origin prompt queues behind a pending question instead of answering it" do
@@ -1152,6 +1199,44 @@ defmodule ObanClaude.AgentTest do
       assert {:error, {:enqueue_failed, :db_down}} = Agent.approve_action(id, action_id)
       assert {:ok, {:awaiting_permission, %{id: ^action_id}}} = Agent.status(id)
       assert {:ok, %{pending_action: %{id: ^action_id}}} = Agent.info(id)
+    end
+
+    test "unexpected approval enqueue failures preserve the exact pending gate" do
+      for {kind, reason} <- [
+            raise: :turn_start_exception,
+            throw: :turn_start_throw,
+            exit: :turn_start_exit
+          ] do
+        id = "approval-#{kind}-" <> Integer.to_string(System.unique_integer([:positive]))
+        test_pid = self()
+
+        enqueue_fun = fn args, meta ->
+          if String.starts_with?(args["prompt"], "Approved:") do
+            fail_turn_start(kind)
+          else
+            send(test_pid, {:captured_turn, id, meta})
+            {:ok, :queued}
+          end
+        end
+
+        {:ok, pid} = Agent.start_agent(id, enqueue_fun: enqueue_fun)
+        :processing = Agent.submit_prompt(id, "plan")
+        assert_receive {:captured_turn, ^id, meta}
+
+        request =
+          structured_result(%{"directive" => "request_permission", "action" => "deploy"})
+
+        :ok = Agent.job_finished(id, {:ok, request}, meta)
+
+        assert {:ok, {:awaiting_permission, action}} =
+                 Agent.await(id, :awaiting_permission, 1_000)
+
+        assert {:error, {:enqueue_failed, ^reason}} = Agent.approve_action(id, action.id)
+        assert Process.alive?(pid)
+        assert {:ok, {:awaiting_permission, %{id: action_id}}} = Agent.status(id)
+        assert action_id == action.id
+        assert {:ok, %{pending_action: ^action}} = Agent.info(id)
+      end
     end
   end
 
