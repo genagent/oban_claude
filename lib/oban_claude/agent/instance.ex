@@ -410,15 +410,15 @@ defmodule ObanClaude.Agent.Instance do
       |> Map.merge(extra_args)
       |> Map.put("prompt", prompt)
 
-    with {:ok, continuation, args} <- continuation_args(data, base_args),
-         {:ok, _job} <- enqueue(data, args, turn_id, continuation) do
-      current_turn = %{id: turn_id, retry_watermark: 0, continuation: continuation}
-      data = %{data | current_turn: current_turn, last_continuation: continuation}
-      watchdog = watchdog(data)
+    case prepare_turn(data, base_args, turn_id) do
+      {:ok, continuation} ->
+        current_turn = %{id: turn_id, retry_watermark: 0, continuation: continuation}
+        data = %{data | current_turn: current_turn, last_continuation: continuation}
+        watchdog = watchdog(data)
 
-      {:next_state, :running, record(data, {:prompt, prompt}),
-       reply(from, :processing) ++ [watchdog]}
-    else
+        {:next_state, :running, record(data, {:prompt, prompt}),
+         reply(from, :processing) ++ [watchdog]}
+
       {:error, reason} ->
         failed = continuation_failure(data, reason, :enqueue_failed)
         fallback_data = %{fallback_data | last_continuation: failed}
@@ -426,6 +426,31 @@ defmodule ObanClaude.Agent.Instance do
         {:next_state, fallback_state, record(fallback_data, {:enqueue_failed, reason}),
          reply(from, {:error, {:enqueue_failed, reason}})}
     end
+  end
+
+  defp prepare_turn(data, base_args, turn_id) do
+    with {:ok, continuation, args} <- continuation_args(data, base_args),
+         {:ok, _job} <- enqueue(data, args, turn_id, continuation) do
+      {:ok, continuation}
+    else
+      {:error, reason} -> {:error, reason}
+      _unexpected -> {:error, :unexpected_turn_start_result}
+    end
+  rescue
+    exception ->
+      Logger.error(
+        "ObanClaude.Agent #{data.id}: turn start raised #{inspect(exception.__struct__)}"
+      )
+
+      {:error, :turn_start_exception}
+  catch
+    :throw, _reason ->
+      Logger.error("ObanClaude.Agent #{data.id}: turn start threw")
+      {:error, :turn_start_throw}
+
+    :exit, _reason ->
+      Logger.error("ObanClaude.Agent #{data.id}: turn start exited")
+      {:error, :turn_start_exit}
   end
 
   defp reply(nil, _message), do: []
@@ -762,7 +787,9 @@ defmodule ObanClaude.Agent.Instance do
       nil ->
         session_id = SessionArcs.session(data.arcs, arc_id)
 
-        case {data.continuation_request, session_id} do
+        request = effective_continuation_request(data.continuation_request, session_id)
+
+        case {request, session_id} do
           {:resume, nil} ->
             {:ok, continuation(data, :fresh, :no_session, nil), args}
 
@@ -778,6 +805,12 @@ defmodule ObanClaude.Agent.Instance do
         end
     end
   end
+
+  defp effective_continuation_request(request, session_id)
+       when request in [:fresh, :fresh_fallback] and is_binary(session_id),
+       do: :resume
+
+  defp effective_continuation_request(request, _session_id), do: request
 
   defp continuation(data, decision, reason, session_id, opts \\ []) do
     %{
