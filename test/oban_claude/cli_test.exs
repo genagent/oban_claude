@@ -159,7 +159,8 @@ defmodule ObanClaude.CLITest do
       {text, ok?} =
         Doctor.report([
           {"claude binary + version", {:ok, %{version: "1.2.3"}}},
-          {"authentication", {:ok, %{status: "authenticated"}}}
+          {"authentication",
+           Doctor.auth_check({:ok, %{logged_in: true, auth_method: "claude.ai", extra: %{}}})}
         ])
 
       assert ok?
@@ -167,11 +168,12 @@ defmodule ObanClaude.CLITest do
       assert text =~ "[ok]"
     end
 
-    test "any failed check -> not-ready, and ok? is false" do
+    test "a logged-out CLI -> not-ready, and ok? is false (the doctor exit status)" do
       {text, ok?} =
         Doctor.report([
           {"claude binary + version", {:ok, %{version: "1.2.3"}}},
-          {"authentication", {:error, :not_logged_in}}
+          {"authentication",
+           Doctor.auth_check({:ok, %{logged_in: false, auth_method: nil, extra: %{}}})}
         ])
 
       refute ok?
@@ -183,13 +185,42 @@ defmodule ObanClaude.CLITest do
     test "json_report/2 is machine-clean" do
       json =
         Doctor.json_report(
-          [{"authentication", {:error, :not_logged_in}}],
+          [
+            {"authentication",
+             Doctor.auth_check({:ok, %{logged_in: false, auth_method: nil, extra: %{}}})}
+          ],
           false
         )
 
       decoded = :json.decode(json)
       assert decoded["ok"] == false
       assert [%{"name" => "authentication", "status" => "error"}] = decoded["checks"]
+    end
+  end
+
+  describe "Doctor.auth_check/1" do
+    test "logged_in: true passes" do
+      info = %{logged_in: true, auth_method: "claude.ai", extra: %{}}
+      assert Doctor.auth_check({:ok, info}) == {:ok, info}
+    end
+
+    test "logged_in: false with an empty extra fails" do
+      info = %{logged_in: false, auth_method: nil, extra: %{}}
+      assert Doctor.auth_check({:ok, info}) == {:error, {:not_logged_in, info}}
+    end
+
+    test "camelCase loggedIn in extra passes (claude_wrapper_ex#252 fallback)" do
+      info = %{logged_in: false, auth_method: nil, extra: %{"loggedIn" => true}}
+      assert Doctor.auth_check({:ok, info}) == {:ok, info}
+    end
+
+    test "a non-JSON raw text status fails as unknown" do
+      assert Doctor.auth_check({:ok, "raw text"}) ==
+               {:error, {:auth_status_unknown, "raw text"}}
+    end
+
+    test "an error passes through as a failure" do
+      assert Doctor.auth_check({:error, :enoent}) == {:error, :enoent}
     end
   end
 end
