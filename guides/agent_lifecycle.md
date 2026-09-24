@@ -193,8 +193,11 @@ very turn it should observe as busy, and skip-policy can never fire.
   * `history/1` -- the bounded event log (`:max_history`, default 500).
   * Telemetry: `[:oban_claude, :agent, :transition]` with
     `%{agent_id, from, to}`, and `[:oban_claude, :agent, :turn_completed]`
-    with the arc, session, continuation decision, and typed outcome, plus the
-    run-level events documented in `ObanClaude`.
+    with the arc, session, continuation decision, and typed outcome. Pass an
+    opaque `correlation_id` to `submit_prompt/3` or `cast_prompt/3` to carry an
+    application request identity through postponed delivery, job metadata,
+    turn transitions, approval continuations, and completion. Turn events also
+    expose the wrapper-owned `agent_generation` and `agent_turn_id`.
 
 ## Testing without a queue or claude
 
