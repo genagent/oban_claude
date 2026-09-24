@@ -31,7 +31,9 @@ defmodule ObanClaude.Agent.Instance do
   atom, paired with the pending action or question in the gated states -- so
   `ObanClaude.Agent.status/1` reads both without messaging the process. Each
   change also emits `[:oban_claude, :agent, :transition]` telemetry with
-  `%{agent_id, from, to}` metadata (state atoms).
+  `%{agent_id, from, to}` metadata (state atoms). Turn transitions also carry
+  the wrapper-owned generation, turn and arc identities, plus the optional
+  application `correlation_id`.
 
   Claude session ids are retained in bounded, host-named conversation arcs.
   Prompts that omit an arc use `"default"`, preserving the original one-agent,
@@ -138,6 +140,7 @@ defmodule ObanClaude.Agent.Instance do
       active_arc_id: "default",
       continuation_request: :resume,
       fork_from_arc_id: nil,
+      correlation_id: nil,
       last_continuation: nil
     }
 
@@ -420,7 +423,8 @@ defmodule ObanClaude.Agent.Instance do
          reply(from, :processing) ++ [watchdog]}
 
       {:error, reason} ->
-        failed = continuation_failure(data, reason, :enqueue_failed)
+        failed = continuation_failure(data, reason, :enqueue_failed, turn_id)
+        emit_completion(data, failed)
         fallback_data = %{fallback_data | last_continuation: failed}
 
         {:next_state, fallback_state, record(fallback_data, {:enqueue_failed, reason}),
@@ -430,6 +434,7 @@ defmodule ObanClaude.Agent.Instance do
 
   defp prepare_turn(data, base_args, turn_id) do
     with {:ok, continuation, args} <- continuation_args(data, base_args),
+         continuation <- identify_continuation(data, continuation, turn_id),
          {:ok, _job} <- enqueue(data, args, turn_id, continuation) do
       {:ok, continuation}
     else
@@ -480,7 +485,8 @@ defmodule ObanClaude.Agent.Instance do
         active_arc_id: arc_id,
         continuation_request: request,
         fork_from_arc_id: Map.get(opts, :fork_from),
-        origin: Map.get(opts, :origin, :operator)
+        origin: Map.get(opts, :origin, :operator),
+        correlation_id: Map.get(opts, :correlation_id)
     }
   end
 
@@ -606,6 +612,7 @@ defmodule ObanClaude.Agent.Instance do
       "continuation_decision" => to_string(continuation.decision),
       "continuation_reason" => to_string(continuation.reason)
     }
+    |> maybe_put_meta("correlation_id", continuation.correlation_id)
     |> maybe_put_meta("session_id", continuation.session_id)
     |> maybe_put_meta("fork_from_arc_id", continuation.fork_from_arc_id)
   end
@@ -821,12 +828,13 @@ defmodule ObanClaude.Agent.Instance do
       result_session_id: nil,
       fork_from_arc_id: Keyword.get(opts, :fork_from_arc_id),
       origin: data.origin,
+      correlation_id: data.correlation_id,
       outcome: :running,
       outcome_reason: nil
     }
   end
 
-  defp continuation_failure(data, reason, outcome) do
+  defp continuation_failure(data, reason, outcome, turn_id) do
     session_id = SessionArcs.session(data.arcs, data.active_arc_id)
 
     data
@@ -836,7 +844,15 @@ defmodule ObanClaude.Agent.Instance do
       session_id,
       fork_from_arc_id: data.fork_from_arc_id
     )
+    |> then(&identify_continuation(data, &1, turn_id))
     |> Map.merge(%{outcome: outcome, outcome_reason: reason})
+  end
+
+  defp identify_continuation(data, continuation, turn_id) do
+    Map.merge(continuation, %{
+      agent_generation: data.generation,
+      agent_turn_id: turn_id
+    })
   end
 
   defp failure_decision(%{fork_from_arc_id: fork_from}, _session_id) when is_binary(fork_from),
@@ -911,7 +927,10 @@ defmodule ObanClaude.Agent.Instance do
       %{system_time: System.system_time()},
       %{
         agent_id: data.id,
+        agent_generation: continuation.agent_generation,
+        agent_turn_id: continuation.agent_turn_id,
         arc_id: continuation.arc_id,
+        correlation_id: continuation.correlation_id,
         session_id: continuation.result_session_id || continuation.session_id,
         continuation_decision: continuation.decision,
         continuation_reason: continuation.reason,
@@ -941,8 +960,30 @@ defmodule ObanClaude.Agent.Instance do
     :telemetry.execute(
       [:oban_claude, :agent, :transition],
       %{system_time: System.system_time()},
-      %{agent_id: data.id, from: from, to: to}
+      transition_meta(from, to, data)
     )
+  end
+
+  defp transition_meta(from, to, data) do
+    continuation =
+      cond do
+        to == :running -> current_or_last_continuation(data)
+        from == :running -> current_or_last_continuation(data)
+        true -> nil
+      end
+
+    %{agent_id: data.id, from: from, to: to}
+    |> put_continuation_identity(continuation)
+  end
+
+  defp put_continuation_identity(meta, nil), do: meta
+
+  defp put_continuation_identity(meta, continuation) do
+    meta
+    |> Map.put(:agent_generation, continuation.agent_generation)
+    |> Map.put(:agent_turn_id, continuation.agent_turn_id)
+    |> Map.put(:arc_id, continuation.arc_id)
+    |> maybe_put_meta(:correlation_id, continuation.correlation_id)
   end
 
   # The registry value `ObanClaude.Agent.status/1` serves: the gated states

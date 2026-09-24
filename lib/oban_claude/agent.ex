@@ -149,6 +149,9 @@ defmodule ObanClaude.Agent do
       scheduled delivery: in `:waiting_for_user` it queues behind the pending
       question instead of being consumed as the answer.
       `ObanClaude.Agent.Tick` sets this; operators rarely should.
+    * `:correlation_id` -- an optional opaque application-owned string carried
+      through postponed delivery, Oban job metadata, and Agent lifecycle
+      telemetry. The wrapper preserves it but does not interpret it.
   """
   @spec submit_prompt(agent_id(), String.t(), keyword()) :: :processing | {:error, term()}
   def submit_prompt(agent_id, prompt, opts \\ []) do
@@ -308,6 +311,7 @@ defmodule ObanClaude.Agent do
     origin = Keyword.get(opts, :origin, :operator)
     arc_id = Keyword.get(opts, :arc_id)
     fork_from = Keyword.get(opts, :fork_from)
+    correlation_id = Keyword.get(opts, :correlation_id)
 
     unless session in [:resume, :fresh, :fresh_fallback] do
       raise ArgumentError,
@@ -320,8 +324,15 @@ defmodule ObanClaude.Agent do
 
     validate_arc_id!(:arc_id, arc_id)
     validate_arc_id!(:fork_from, fork_from)
+    validate_correlation_id!(correlation_id)
 
-    %{session: session, origin: origin, arc_id: arc_id, fork_from: fork_from}
+    %{
+      session: session,
+      origin: origin,
+      arc_id: arc_id,
+      fork_from: fork_from,
+      correlation_id: correlation_id
+    }
   end
 
   defp validate_arc_id!(_name, nil), do: :ok
@@ -333,6 +344,17 @@ defmodule ObanClaude.Agent do
   defp validate_arc_id!(name, value) do
     raise ArgumentError,
           ":#{name} must be a non-empty string of at most 256 bytes, got: #{inspect(value)}"
+  end
+
+  defp validate_correlation_id!(nil), do: :ok
+
+  defp validate_correlation_id!(value)
+       when is_binary(value) and byte_size(value) in 1..256,
+       do: :ok
+
+  defp validate_correlation_id!(value) do
+    raise ArgumentError,
+          ":correlation_id must be a non-empty string of at most 256 bytes, got: #{inspect(value)}"
   end
 
   defp poll_await(agent_id, states, deadline) do
