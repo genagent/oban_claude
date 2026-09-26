@@ -17,6 +17,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - uses: erlef/setup-beam@v1
+        id: beam
         with:
           otp-version: "29"
           elixir-version: "1.20"
@@ -26,9 +27,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock') }}
+          key: ${{ runner.os }}-mix-otp${{ steps.beam.outputs.otp-version }}-elixir${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-mix-
+            ${{ runner.os }}-mix-otp${{ steps.beam.outputs.otp-version }}-elixir${{ steps.beam.outputs.elixir-version }}-
 
       # Dialyzer's PLT is expensive to build; cache it keyed on the toolchain and
       # deps so it only rebuilds when those change.
@@ -40,6 +41,7 @@ jobs:
             ${{ runner.os }}-plt-otp29-elixir1.20-
 
       - run: mix deps.get
+      - run: mix deps.unlock --check-unused
       # Fail if a locked dep has been retired on Hex (security/yanked), so it
       # can't be silently reinstalled or republished against.
       - run: mix hex.audit
