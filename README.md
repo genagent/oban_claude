@@ -19,14 +19,16 @@ call that returns a typed `%ClaudeWrapper.Result{}` / `%ClaudeWrapper.Error{}`.
 
 ## Install
 
+<!-- x-release-please-start-version -->
 ```elixir
 def deps do
   [
     {:oban, "~> 2.23"},
-    {:oban_claude, "~> 0.5"}
+    {:oban_claude, "~> 0.7.1"}
   ]
 end
 ```
+<!-- x-release-please-end -->
 
 ## Requirements
 
