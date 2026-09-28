@@ -346,10 +346,13 @@ a watchdog); structured-output **directives** route the post-turn state
 approved-but-incomplete work re-gates instead of dying; retries stay one
 logical turn; a correlated `pause_after_turn/3` latch lets host rails pause at
 the terminal boundary without racing queued prompts or erasing action and
-question gates; `ObanClaude.Agent.Tick` turns an `Oban.Plugins.Cron` entry into
-a self-(re)starting scheduled routine; and `status/1`/`await/3`/`list/0` read
-the fleet off the registry without messaging a process. Fully testable with no
-DB and no claude via the `:enqueue_fun` seam.
+question gates; `quiesce/2` gives host config changes the same atomic boundary
+without requiring captured turn metadata; an opaque `config_revision` proves
+which immutable config the process and its turns applied;
+`ObanClaude.Agent.Tick` turns an `Oban.Plugins.Cron` entry into a
+self-(re)starting scheduled routine; and `status/1`/`await/3`/`list/0` read the
+fleet off the registry without messaging a process. Fully testable with no DB
+and no claude via the `:enqueue_fun` seam.
 
 See the [Agent lifecycle](guides/agent_lifecycle.md) guide, and
 `examples/agent_lifecycle.exs` (offline) / `agent_live.exs`,

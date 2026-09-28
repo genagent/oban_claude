@@ -222,6 +222,7 @@ defmodule ObanClaude.Agent.TickTest do
       "if_offline" => "start",
       "start" => %{
         "args" => %{"model" => "haiku"},
+        "config_revision" => "routine-config-v3",
         "job_timeout" => 90_000,
         "session_arcs" => %{"restored" => "seed-session"}
       }
@@ -243,7 +244,13 @@ defmodule ObanClaude.Agent.TickTest do
     assert %{"prompt" => "boot beat", "model" => "haiku", "resume" => "seed-session"} =
              Jason.decode!(row.args)
 
-    assert %{"agent_id" => ^id, "arc_id" => "restored"} = Jason.decode!(row.meta)
+    assert %{
+             "agent_id" => ^id,
+             "arc_id" => "restored",
+             "config_revision" => "routine-config-v3"
+           } = Jason.decode!(row.meta)
+
+    assert {:ok, %{config_revision: "routine-config-v3"}} = Agent.info(id)
   end
 
   test "session fresh delivers the beat without a resume handle" do

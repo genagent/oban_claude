@@ -43,6 +43,7 @@ defmodule ObanClaude.Agent do
 
   @typedoc "A deferred pause and the turn that first requested it."
   @type pause_latch :: %{
+          cause: :pause_after_turn | :quiesce,
           reason: pause_reason(),
           source_generation: String.t(),
           source_turn_id: String.t(),
@@ -280,6 +281,24 @@ defmodule ObanClaude.Agent do
     call(agent_id, {:pause_after_turn, reason, captured_meta})
   end
 
+  @doc """
+  Synchronously move an agent toward a host-requested safe boundary.
+
+  An idle agent pauses immediately. A running agent finishes its current turn;
+  an agent parked on a question or permission keeps that gate and allows its
+  continuation. In both cases the agent pauses at the next terminal boundary,
+  and rejecting a pending permission pauses immediately. An existing latch is
+  retained, so the first reason wins.
+
+  Returns `:paused` when the boundary was immediate, `:armed` when a deferred
+  pause is active, or `:already_paused` when the agent was already paused.
+  Unlike `pause_after_turn/3`, this host operation needs no captured turn
+  identity because the state machine selects its current boundary atomically.
+  """
+  @spec quiesce(agent_id(), pause_reason()) ::
+          :paused | :armed | :already_paused | {:error, term()}
+  def quiesce(agent_id, reason), do: call(agent_id, {:quiesce, reason})
+
   @doc "Asynchronously force the agent into `:paused` lockdown, from any state. Drops any pending action or question."
   @spec emergency_pause(agent_id()) :: :ok | {:error, :agent_not_running}
   def emergency_pause(agent_id) do
@@ -294,7 +313,8 @@ defmodule ObanClaude.Agent do
   The agent's bookkeeping in one map. `:session_id` remains the legacy default
   arc handle; `:session_arcs`, `:active_arc_id`, and `:continuation` expose the
   named-arc state and the current or most recent fresh/resume decision. Also
-  includes `:state`, `:turns`, accumulated `:cost_usd`, and any pending gate.
+  includes `:state`, `:turns`, accumulated `:cost_usd`, the applied opaque
+  `:config_revision`, and any pending gate.
   """
   @spec info(agent_id()) :: {:ok, map()} | {:error, :agent_not_running}
   def info(agent_id), do: call(agent_id, :info)

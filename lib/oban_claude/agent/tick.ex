@@ -41,7 +41,7 @@ defmodule ObanClaude.Agent.Tick do
       * `"skip"` (default) -- cancel this beat (`{:cancel, :agent_not_running}`).
       * `"start"` -- start the agent, then deliver. Config comes from the
         optional `"start"` map -- `"args"`, `"approved_args"`, `"job_timeout"`,
-        `"session_arcs"`, and `"max_session_arcs"`
+        `"session_arcs"`, `"max_session_arcs"`, and `"config_revision"`
         (the JSON-clean subset of `ObanClaude.Agent.Instance` config; a
         custom `:worker` or `:oban` needs the agent started by the host app
         instead). With `"start"` the crontab is effectively the agent's spec.
@@ -120,7 +120,8 @@ defmodule ObanClaude.Agent.Tick do
       approved_args: Map.get(start, "approved_args", %{}),
       job_timeout: Map.get(start, "job_timeout", 60_000),
       session_arcs: Map.get(start, "session_arcs", %{}),
-      max_session_arcs: Map.get(start, "max_session_arcs", 32)
+      max_session_arcs: Map.get(start, "max_session_arcs", 32),
+      config_revision: Map.get(start, "config_revision")
     ]
 
     case Agent.start_agent(agent_id, config) do

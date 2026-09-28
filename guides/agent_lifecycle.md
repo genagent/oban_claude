@@ -46,7 +46,7 @@ for the full config table.
 | `:running` | an Oban job is in flight | postponed until the turn ends |
 | `:waiting_for_user` | the last turn asked a question | consumed as the answer (except `origin: :tick`, which queues) |
 | `:awaiting_permission` | the last turn requested approval | postponed until the gate clears |
-| `:paused` | lockdown via `emergency_pause/1` or `pause_after_turn/3` | refused (calls) or dropped-and-recorded (casts) |
+| `:paused` | lockdown via `emergency_pause/1`, `pause_after_turn/3`, or `quiesce/2` | refused (calls) or dropped-and-recorded (casts) |
 
 A `:state_timeout` watchdog (`:job_timeout`, default 60s) guards `:running`
 against a turn that never reports back. Every state change atomically updates
@@ -116,7 +116,11 @@ Pass the exact job metadata captured at enqueue time. The machine validates the
 agent id, instance generation, and logical turn id atomically. A foreign,
 stale, retired, or malformed identity returns a typed error and changes
 nothing. Repeating the accepted source or current/latest owner identity is
-idempotent; the first pause reason wins.
+idempotent; the first pause reason wins. A matching completed turn remains
+correlatable while it is parked in `:waiting_for_user` or
+`:awaiting_permission`, so a host that learns about the rail after the gate
+opens can still install the latch without erasing the gate. A terminal turn
+that already reached `:idle` remains retired and cannot be latched afterward.
 
 Ordinary completion, terminal failure, and watchdog expiry now land directly
 in `:paused`, before postponed prompts can run. A permission request or user
@@ -128,6 +132,37 @@ gate records the denial and goes directly to `:paused`.
 Retries remain part of the same logical turn and keep the latch. An explicit
 `resume_agent/1` clears it. `emergency_pause/1` remains immediate and clears the
 latch together with all gate scopes.
+
+For lifecycle changes that do not originate in turn telemetry, use
+`quiesce/2`. It chooses the boundary atomically inside the state machine, so a
+host does not need a racy `status/1` read followed by a pause:
+
+    case ObanClaude.Agent.quiesce("caretaker", {:config_changed, revision}) do
+      :paused -> restart_with_new_config()
+      :armed -> wait_until_paused_then_restart()
+      :already_paused -> restart_with_new_config()
+    end
+
+An idle agent pauses immediately. A running agent finishes its turn. A gated
+agent retains its question or permission and allows the continuation before
+pausing; rejecting a pending permission pauses immediately. Existing latches
+are left in place, so the first reason wins. `quiesce/2` emits the same
+`pause_reason` and `pause_action` transition fields with `cause: :quiesce`.
+
+An optional `config_revision` on `start_agent/2` identifies the immutable host
+configuration applied to that provider process. It is an opaque non-empty
+string of at most 256 bytes. The provider does not compare or compute it:
+
+    ObanClaude.Agent.start_agent("caretaker",
+      args: %{"model" => "sonnet"},
+      config_revision: "routine-42:7"
+    )
+
+The applied revision appears in `info/1`, every job's metadata, and Agent
+transition and turn-completion telemetry. It is omitted from metadata when no
+revision was supplied. The host can compare the observed revision with its
+desired revision, call `quiesce/2`, stop the paused process, and start a new
+one. The provider never mutates a running config in place.
 
 ## Prompts: sync, async, and options
 
@@ -216,7 +251,10 @@ worker layer) to the machine (which owns turn enqueueing): a beat delivers a
           "prompt" => "Summarize overnight CI failures.",
           "session" => "fresh",
           "if_offline" => "start",
-          "start" => %{"args" => %{"model" => "sonnet"}}
+          "start" => %{
+            "args" => %{"model" => "sonnet"},
+            "config_revision" => "routine-42:7"
+          }
         }}
      ]}
 
@@ -234,23 +272,28 @@ very turn it should observe as busy, and skip-policy can never fire.
   * `await/3` -- block until the agent settles into given states; returns the
     full status payload. Registry-polling.
   * `list/0` -- every running agent as `{id, status}`, off the registry.
-  * `info/1` -- turn count, accumulated cost, default `session_id`, all retained
+  * `info/1` -- applied `config_revision`, turn count, accumulated cost,
+    default `session_id`, all retained
     `session_arcs`, current/recent continuation, pending gates, and the current
     `deferred_pause` latch (a call; in-process, so the host seeds persisted arcs
     after restart).
   * `history/1` -- the bounded event log (`:max_history`, default 500). A safe
     boundary latch records `{:pause_after_turn, reason}` when accepted and
-    `{:paused_after_turn, reason}` when it is applied.
+    `{:paused_after_turn, reason}` when it is applied. A host boundary records
+    `{:quiesce, reason}` when armed or `{:quiesced, reason}` when an idle agent
+    pauses immediately.
   * Telemetry: `[:oban_claude, :agent, :transition]` with
     `%{agent_id, from, to}`, and `[:oban_claude, :agent, :turn_completed]`
     with the arc, session, continuation decision, and typed outcome. Pass an
     opaque `correlation_id` to `submit_prompt/3` or `cast_prompt/3` to carry an
     application request identity through postponed delivery, job metadata,
     turn transitions, approval continuations, and completion. Turn events also
-    expose the wrapper-owned `agent_generation` and `agent_turn_id`. Deferred
-    pause transitions add `cause` (`:pause_after_turn` for the latch,
-    `:emergency_pause` for the immediate brake), `pause_reason`, and
-    `pause_action` (`:continued`, `:applied`, or `:cleared`). Gate transitions
+    expose the wrapper-owned `agent_generation` and `agent_turn_id`; when set,
+    `config_revision` appears on every transition and completion. Deferred
+    pause transitions add `cause` (`:pause_after_turn` for a correlated latch,
+    `:quiesce` for a host boundary, `:emergency_pause` for the immediate
+    brake), `pause_reason`, and `pause_action` (`:continued`, `:applied`, or
+    `:cleared`). Gate transitions
     also add `gate_outcome` (`:opened`, `:approved`, `:answered`, `:incomplete`,
     or `:rejected`) and the relevant `action_id` or `question`.
 
