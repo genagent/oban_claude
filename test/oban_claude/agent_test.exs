@@ -983,6 +983,54 @@ defmodule ObanClaude.AgentTest do
   end
 
   describe ":paused" do
+    test "info retains the applied pause context until resume" do
+      id = start_agent!()
+      assert {:ok, %{pause_context: nil}} = Agent.info(id)
+
+      assert :processing =
+               Agent.submit_prompt(id, "work",
+                 arc_id: "recovery",
+                 correlation_id: "pause-recovery"
+               )
+
+      assert_receive {:captured_turn, ^id, meta}
+      assert_receive {:enqueued, _args, ^meta}
+      assert :ok = Agent.pause_after_turn(id, :daily_spend, meta)
+      assert :ok = Agent.job_finished(id, {:ok, result("done")}, meta)
+      assert {:ok, :paused} = Agent.await(id, :paused, 1_000)
+
+      assert {:ok,
+              %{
+                pause_context: %{
+                  cause: :pause_after_turn,
+                  pause_reason: :daily_spend,
+                  pause_action: :applied,
+                  agent_generation: generation,
+                  agent_turn_id: turn_id,
+                  arc_id: "recovery",
+                  correlation_id: "pause-recovery"
+                }
+              }} = Agent.info(id)
+
+      assert generation == meta["agent_generation"]
+      assert turn_id == meta["agent_turn_id"]
+
+      assert :ok = Agent.emergency_pause(id)
+      settle(id)
+
+      assert {:ok,
+              %{
+                pause_context: %{
+                  cause: :emergency_pause,
+                  pause_reason: :emergency_pause,
+                  pause_action: :applied
+                }
+              }} = Agent.info(id)
+
+      assert :resumed = Agent.resume_agent(id)
+      assert {:ok, %{state: :idle, pause_context: nil}} = Agent.info(id)
+    end
+
     test "emergency pause reports its cause, reason, and action" do
       handler = "emergency-pause-transition-#{System.unique_integer([:positive])}"
       test_pid = self()
@@ -1066,7 +1114,17 @@ defmodule ObanClaude.AgentTest do
 
       assert :paused = Agent.quiesce(id, :config_changed)
       assert :already_paused = Agent.quiesce(id, :another_reason)
-      assert {:ok, %{state: :paused, deferred_pause: nil}} = Agent.info(id)
+
+      assert {:ok,
+              %{
+                state: :paused,
+                deferred_pause: nil,
+                pause_context: %{
+                  cause: :quiesce,
+                  pause_reason: :config_changed,
+                  pause_action: :applied
+                }
+              }} = Agent.info(id)
 
       assert_receive {:quiesce_transition,
                       %{

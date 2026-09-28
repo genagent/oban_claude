@@ -144,6 +144,7 @@ defmodule ObanClaude.Agent.Instance do
       generation: identity_token(),
       current_turn: nil,
       deferred_pause: nil,
+      pause_context: nil,
       # set while an approve continuation is in flight: an approved turn that
       # fails or times out RE-GATES (the action was approved but not
       # completed) instead of falling to :idle with the elevation lost
@@ -171,12 +172,12 @@ defmodule ObanClaude.Agent.Instance do
     case process_event(state, type, content, data) do
       {:next_state, next, new_data} when next != state ->
         {transition_context, new_data} = Map.pop(new_data, :transition_context, %{})
-        sync_transition(state, next, new_data, transition_context)
+        new_data = sync_transition(state, next, new_data, transition_context)
         {:next_state, next, new_data}
 
       {:next_state, next, new_data, actions} when next != state ->
         {transition_context, new_data} = Map.pop(new_data, :transition_context, %{})
-        sync_transition(state, next, new_data, transition_context)
+        new_data = sync_transition(state, next, new_data, transition_context)
         {:next_state, next, new_data, actions}
 
       other ->
@@ -205,6 +206,7 @@ defmodule ObanClaude.Agent.Instance do
       pending_action: data.pending_action,
       pending_question: data.pending_question,
       deferred_pause: data.deferred_pause,
+      pause_context: data.pause_context,
       config_revision: data.config.config_revision
     }
 
@@ -284,12 +286,7 @@ defmodule ObanClaude.Agent.Instance do
         deferred_pause: nil
     }
 
-    data =
-      put_transition_context(data, %{
-        cause: :emergency_pause,
-        pause_reason: :emergency_pause,
-        pause_action: :applied
-      })
+    data = put_transition_context(data, emergency_pause_context())
 
     {:next_state, :paused, data}
   end
@@ -301,7 +298,8 @@ defmodule ObanClaude.Agent.Instance do
         pending_question: nil,
         gate_turn: nil,
         in_flight_approval: nil,
-        deferred_pause: nil
+        deferred_pause: nil,
+        pause_context: emergency_pause_context()
     }
 
     {:keep_state, data}
@@ -1275,6 +1273,8 @@ defmodule ObanClaude.Agent.Instance do
   end
 
   defp sync_transition(from, to, data, context) do
+    data = retain_pause_context(from, to, data, context)
+
     Registry.update_value(@registry, data.id, fn _old -> status_value(to, data) end)
 
     :telemetry.execute(
@@ -1282,7 +1282,17 @@ defmodule ObanClaude.Agent.Instance do
       %{system_time: System.system_time()},
       transition_meta(from, to, data, context)
     )
+
+    data
   end
+
+  defp retain_pause_context(_from, :paused, data, context),
+    do: %{data | pause_context: context}
+
+  defp retain_pause_context(:paused, _to, data, _context),
+    do: %{data | pause_context: nil}
+
+  defp retain_pause_context(_from, _to, data, _context), do: data
 
   defp transition_meta(from, to, data, context) do
     continuation =
@@ -1337,6 +1347,14 @@ defmodule ObanClaude.Agent.Instance do
 
   defp put_transition_context(data, context) do
     Map.put(data, :transition_context, context)
+  end
+
+  defp emergency_pause_context do
+    %{
+      cause: :emergency_pause,
+      pause_reason: :emergency_pause,
+      pause_action: :applied
+    }
   end
 
   # The registry value `ObanClaude.Agent.status/1` serves: the gated states

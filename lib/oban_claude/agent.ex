@@ -314,7 +314,8 @@ defmodule ObanClaude.Agent do
   arc handle; `:session_arcs`, `:active_arc_id`, and `:continuation` expose the
   named-arc state and the current or most recent fresh/resume decision. Also
   includes `:state`, `:turns`, accumulated `:cost_usd`, the applied opaque
-  `:config_revision`, and any pending gate.
+  `:config_revision`, any pending gate, the active `:deferred_pause` latch,
+  and the applied `:pause_context` while the agent is paused.
   """
   @spec info(agent_id()) :: {:ok, map()} | {:error, :agent_not_running}
   def info(agent_id), do: call(agent_id, :info)

@@ -275,8 +275,9 @@ very turn it should observe as busy, and skip-policy can never fire.
   * `info/1` -- applied `config_revision`, turn count, accumulated cost,
     default `session_id`, all retained
     `session_arcs`, current/recent continuation, pending gates, and the current
-    `deferred_pause` latch (a call; in-process, so the host seeds persisted arcs
-    after restart).
+    `deferred_pause` latch. While paused, `pause_context` retains the cause,
+    reason, action, and any correlated turn identity that applied the pause (a
+    call; in-process, so the host seeds persisted arcs after restart).
   * `history/1` -- the bounded event log (`:max_history`, default 500). A safe
     boundary latch records `{:pause_after_turn, reason}` when accepted and
     `{:paused_after_turn, reason}` when it is applied. A host boundary records
