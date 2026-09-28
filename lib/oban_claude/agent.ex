@@ -38,6 +38,30 @@ defmodule ObanClaude.Agent do
   @typedoc "The caller-chosen agent identity, unique per running agent."
   @type agent_id :: term()
 
+  @typedoc "Why the host requested a pause at the current turn's safe boundary."
+  @type pause_reason :: term()
+
+  @typedoc "A deferred pause and the turn that first requested it."
+  @type pause_latch :: %{
+          reason: pause_reason(),
+          source_generation: String.t(),
+          source_turn_id: String.t(),
+          owner_generation: String.t(),
+          owner_turn_id: String.t(),
+          owner_arc_id: String.t(),
+          owner_correlation_id: String.t() | nil
+        }
+
+  @typedoc "Why a deferred pause request was not accepted."
+  @type pause_after_turn_error ::
+          :agent_not_running
+          | :agent_id_mismatch
+          | :malformed_identity
+          | :foreign_generation
+          | :retired_turn
+          | :stale_turn
+          | {:invalid_state, atom()}
+
   @typedoc """
   What `status/1` returns: a bare state atom, except the two gated states,
   which atomically carry what they are gated on (the action map holds the
@@ -223,10 +247,37 @@ defmodule ObanClaude.Agent do
     call(agent_id, {:approve_action, action_id, Keyword.get(opts, :args, %{})})
   end
 
-  @doc "Reject the pending action: the denial is recorded and the agent returns to `:idle`."
+  @doc """
+  Reject the pending action and record the denial.
+
+  The agent returns to `:idle`, unless a `pause_after_turn/3` latch is active;
+  then rejection applies the latch and returns the agent to `:paused`.
+  """
   @spec reject_action(agent_id(), String.t(), String.t()) :: :rejected | {:error, term()}
   def reject_action(agent_id, action_id, reason \\ "denied") do
     call(agent_id, {:reject_action, action_id, reason})
+  end
+
+  @doc """
+  Synchronously latch a pause for the current logical turn.
+
+  `captured_meta` is the exact job metadata emitted when that turn was
+  enqueued. The instance validates its agent id, generation, and turn id
+  atomically before accepting the latch. Matching repeats are idempotent, even
+  after the turn reaches a gate or the paused state. The first accepted reason
+  wins; repeats do not replace it. Invalid metadata returns the precise
+  `t:pause_after_turn_error/0` without changing the agent.
+
+  A normal terminal outcome and a watchdog timeout land directly in
+  `:paused`, before postponed prompts can run. An `ask_user` or
+  `request_permission` directive remains gated; answering or approving grants
+  one continuation while retaining the latch. Explicit `resume_agent/1` and
+  `emergency_pause/1` clear it.
+  """
+  @spec pause_after_turn(agent_id(), pause_reason(), map()) ::
+          :ok | {:error, pause_after_turn_error()}
+  def pause_after_turn(agent_id, reason, captured_meta) do
+    call(agent_id, {:pause_after_turn, reason, captured_meta})
   end
 
   @doc "Asynchronously force the agent into `:paused` lockdown, from any state. Drops any pending action or question."
