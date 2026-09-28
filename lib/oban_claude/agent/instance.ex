@@ -24,9 +24,10 @@ defmodule ObanClaude.Agent.Instance do
       An approved turn that fails or hits the watchdog RE-GATES (same
       description, fresh id, `{:approval_incomplete, reason}` in history):
       the work was approved but not completed, and a re-approval resumes it
-    * `:paused` -- lockdown via `:emergency_pause` or a deferred
-      `ObanClaude.Agent.pause_after_turn/3`; every call is refused until an
-      explicit `resume`
+    * `:paused` -- lockdown via `:emergency_pause`, a correlated
+      `ObanClaude.Agent.pause_after_turn/3`, or a host-requested
+      `ObanClaude.Agent.quiesce/2`; every call is refused until an explicit
+      `resume`
 
   Every state change atomically synchronizes the registry value -- the state
   atom, paired with the pending action or question in the gated states -- so
@@ -34,7 +35,7 @@ defmodule ObanClaude.Agent.Instance do
   change also emits `[:oban_claude, :agent, :transition]` telemetry with
   `%{agent_id, from, to}` metadata (state atoms). Turn transitions also carry
   the wrapper-owned generation, turn and arc identities, plus the optional
-  application `correlation_id`.
+  application `correlation_id` and applied `config_revision`.
 
   Claude session ids are retained in bounded, host-named conversation arcs.
   Prompts that omit an arc use `"default"`, preserving the original one-agent,
@@ -62,6 +63,8 @@ defmodule ObanClaude.Agent.Instance do
       `%{}`
     * `:max_session_arcs` -- maximum retained provider handles; least-recently
       used inactive arcs are evicted as new ones arrive; default 32
+    * `:config_revision` -- optional opaque non-empty string identifying the
+      immutable host configuration applied to this process; default `nil`
     * `:enqueue_fun` -- a 2-arity `(args, meta) -> {:ok, term} | {:error, term}`
       override of the enqueue itself, for tests (no Oban, no DB)
   """
@@ -86,7 +89,8 @@ defmodule ObanClaude.Agent.Instance do
     # without bound. Newest entries win; the cap is per-entry, not per-turn.
     max_history: 500,
     session_arcs: %{},
-    max_session_arcs: 32
+    max_session_arcs: 32,
+    config_revision: nil
   }
 
   def child_spec({agent_id, config}) do
@@ -124,6 +128,7 @@ defmodule ObanClaude.Agent.Instance do
     config = Map.merge(@defaults, Map.new(config))
     validate_string_keys!(:args, config.args)
     validate_string_keys!(:approved_args, config.approved_args)
+    validate_config_revision!(config.config_revision)
     arcs = SessionArcs.new(config.session_arcs, config.max_session_arcs)
 
     data = %{
@@ -135,6 +140,7 @@ defmodule ObanClaude.Agent.Instance do
       cost_usd: 0.0,
       pending_action: nil,
       pending_question: nil,
+      gate_turn: nil,
       generation: identity_token(),
       current_turn: nil,
       deferred_pause: nil,
@@ -198,19 +204,22 @@ defmodule ObanClaude.Agent.Instance do
       cost_usd: data.cost_usd,
       pending_action: data.pending_action,
       pending_question: data.pending_question,
-      deferred_pause: data.deferred_pause
+      deferred_pause: data.deferred_pause,
+      config_revision: data.config.config_revision
     }
 
     {:keep_state_and_data, [{:reply, from, {:ok, info}}]}
   end
 
   defp process_event(state, {:call, from}, {:pause_after_turn, reason, meta}, data) do
-    case pause_identity_status(data, meta) do
+    case pause_identity_status(state, data, meta) do
       :already_latched ->
         {:keep_state_and_data, [{:reply, from, :ok}]}
 
-      :ok when state == :running and is_nil(data.deferred_pause) ->
-        deferred_pause = new_deferred_pause(data, reason, meta)
+      :ok
+      when state in [:running, :waiting_for_user, :awaiting_permission] and
+             is_nil(data.deferred_pause) ->
+        deferred_pause = new_correlated_pause(state, data, reason, meta)
 
         data =
           data
@@ -219,7 +228,7 @@ defmodule ObanClaude.Agent.Instance do
 
         {:keep_state, data, [{:reply, from, :ok}]}
 
-      :ok when state == :running ->
+      :ok when state in [:running, :waiting_for_user, :awaiting_permission] ->
         {:keep_state, transfer_deferred_pause(data), [{:reply, from, :ok}]}
 
       :ok ->
@@ -228,6 +237,37 @@ defmodule ObanClaude.Agent.Instance do
       {:error, reason} ->
         {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
     end
+  end
+
+  defp process_event(:paused, {:call, from}, {:quiesce, _reason}, _data) do
+    {:keep_state_and_data, [{:reply, from, :already_paused}]}
+  end
+
+  defp process_event(:idle, {:call, from}, {:quiesce, reason}, data) do
+    data =
+      data
+      |> record({:quiesced, reason})
+      |> put_transition_context(%{
+        cause: :quiesce,
+        pause_reason: reason,
+        pause_action: :applied
+      })
+
+    {:next_state, :paused, data, [{:reply, from, :paused}]}
+  end
+
+  defp process_event(state, {:call, from}, {:quiesce, reason}, data)
+       when state in [:running, :waiting_for_user, :awaiting_permission] do
+    data =
+      if is_nil(data.deferred_pause) do
+        data
+        |> Map.put(:deferred_pause, new_quiesce_pause(state, data, reason))
+        |> record({:quiesce, reason})
+      else
+        data
+      end
+
+    {:keep_state, data, [{:reply, from, :armed}]}
   end
 
   # "Drops active scopes": a pending action, question, or in-flight approval
@@ -239,6 +279,7 @@ defmodule ObanClaude.Agent.Instance do
       record(data, {:paused_from, state})
       | pending_action: nil,
         pending_question: nil,
+        gate_turn: nil,
         in_flight_approval: nil,
         deferred_pause: nil
     }
@@ -258,6 +299,7 @@ defmodule ObanClaude.Agent.Instance do
       data
       | pending_action: nil,
         pending_question: nil,
+        gate_turn: nil,
         in_flight_approval: nil,
         deferred_pause: nil
     }
@@ -374,7 +416,7 @@ defmodule ObanClaude.Agent.Instance do
     question = data.pending_question
 
     candidate =
-      %{data | pending_question: nil}
+      %{data | pending_question: nil, gate_turn: nil}
       |> prompt_data(opts, data.active_arc_id)
       |> put_pause_transition(:continued, %{gate_outcome: :answered, question: question})
 
@@ -385,7 +427,7 @@ defmodule ObanClaude.Agent.Instance do
     question = data.pending_question
 
     candidate =
-      %{data | pending_question: nil}
+      %{data | pending_question: nil, gate_turn: nil}
       |> prompt_data(opts, data.active_arc_id)
       |> put_pause_transition(:continued, %{gate_outcome: :answered, question: question})
 
@@ -414,14 +456,15 @@ defmodule ObanClaude.Agent.Instance do
       {%{id: ^id, description: description}, []} ->
         prompt = "Approved: #{description}. Proceed."
 
-        data = %{
+        candidate = %{
           data
           | pending_action: nil,
+            gate_turn: nil,
             in_flight_approval: %{description: description}
         }
 
-        data =
-          put_pause_transition(data, :continued, %{
+        candidate =
+          put_pause_transition(candidate, :continued, %{
             gate_outcome: :approved,
             action_id: id
           })
@@ -429,10 +472,10 @@ defmodule ObanClaude.Agent.Instance do
         start_turn(
           from,
           prompt,
-          data,
-          Map.merge(data.config.approved_args, args),
+          candidate,
+          Map.merge(candidate.config.approved_args, args),
           :awaiting_permission,
-          %{data | pending_action: %{id: id, description: description}, in_flight_approval: nil}
+          data
         )
 
       _ ->
@@ -444,7 +487,12 @@ defmodule ObanClaude.Agent.Instance do
     case data.pending_action do
       %{id: ^id, description: description} ->
         Logger.info("ObanClaude.Agent #{data.id}: action #{id} rejected: #{reason}")
-        data = %{record(data, {:denied, id, reason}) | pending_action: nil}
+
+        data = %{
+          record(data, {:denied, id, reason})
+          | pending_action: nil,
+            gate_turn: nil
+        }
 
         case data.deferred_pause do
           nil ->
@@ -608,6 +656,7 @@ defmodule ObanClaude.Agent.Instance do
         data =
           data
           |> Map.put(:pending_question, question)
+          |> Map.put(:gate_turn, data.last_continuation)
           |> put_pause_transition(:continued, %{
             gate_outcome: :opened,
             question: question
@@ -621,6 +670,7 @@ defmodule ObanClaude.Agent.Instance do
         data =
           data
           |> Map.put(:pending_action, action)
+          |> Map.put(:gate_turn, data.last_continuation)
           |> put_pause_transition(:continued, %{
             gate_outcome: :opened,
             action_id: action.id
@@ -651,6 +701,7 @@ defmodule ObanClaude.Agent.Instance do
       data
       |> record({:approval_incomplete, reason})
       |> Map.put(:pending_action, action)
+      |> Map.put(:gate_turn, data.last_continuation)
       |> Map.put(:in_flight_approval, nil)
       |> put_pause_transition(:continued, %{
         gate_outcome: :incomplete,
@@ -753,6 +804,7 @@ defmodule ObanClaude.Agent.Instance do
       "continuation_decision" => to_string(continuation.decision),
       "continuation_reason" => to_string(continuation.reason)
     }
+    |> maybe_put_meta("config_revision", data.config.config_revision)
     |> maybe_put_meta("correlation_id", continuation.correlation_id)
     |> maybe_put_meta("session_id", continuation.session_id)
     |> maybe_put_meta("fork_from_arc_id", continuation.fork_from_arc_id)
@@ -861,16 +913,53 @@ defmodule ObanClaude.Agent.Instance do
 
   defp identity_status(_data, _meta), do: {:error, :malformed_identity}
 
-  defp pause_identity_status(%{deferred_pause: deferred_pause} = data, meta)
+  defp pause_identity_status(state, %{deferred_pause: deferred_pause} = data, meta)
        when not is_nil(deferred_pause) do
     if deferred_pause_identity?(data, deferred_pause, meta) do
       :already_latched
     else
-      identity_status(data, meta)
+      pause_unlatched_identity_status(state, data, meta)
     end
   end
 
-  defp pause_identity_status(data, meta), do: identity_status(data, meta)
+  defp pause_identity_status(state, data, meta),
+    do: pause_unlatched_identity_status(state, data, meta)
+
+  defp pause_unlatched_identity_status(state, data, meta) do
+    case identity_status(data, meta) do
+      {:error, :retired_turn} when state in [:waiting_for_user, :awaiting_permission] ->
+        completed_identity_status(data, meta)
+
+      status ->
+        status
+    end
+  end
+
+  defp completed_identity_status(data, meta) when is_map(meta) do
+    generation = Map.get(meta, "agent_generation")
+    turn_id = Map.get(meta, "agent_turn_id")
+    completed = data.gate_turn
+
+    cond do
+      Map.get(meta, "agent_id") !== data.id ->
+        {:error, :agent_id_mismatch}
+
+      not valid_identity_token?(generation) or not valid_identity_token?(turn_id) ->
+        {:error, :malformed_identity}
+
+      generation != data.generation ->
+        {:error, :foreign_generation}
+
+      is_nil(completed) ->
+        {:error, :retired_turn}
+
+      turn_id != completed.agent_turn_id ->
+        {:error, :stale_turn}
+
+      true ->
+        :ok
+    end
+  end
 
   defp deferred_pause_identity?(data, deferred_pause, meta) when is_map(meta) do
     source? =
@@ -886,19 +975,48 @@ defmodule ObanClaude.Agent.Instance do
 
   defp deferred_pause_identity?(_data, _deferred_pause, _meta), do: false
 
-  defp new_deferred_pause(data, reason, meta) do
-    continuation = data.current_turn.continuation
+  defp new_correlated_pause(state, data, reason, meta) do
+    continuation = pause_owner_continuation(state, data)
 
+    deferred_pause(
+      :pause_after_turn,
+      reason,
+      Map.fetch!(meta, "agent_generation"),
+      Map.fetch!(meta, "agent_turn_id"),
+      continuation
+    )
+  end
+
+  defp new_quiesce_pause(state, data, reason) do
+    continuation = pause_owner_continuation(state, data)
+
+    deferred_pause(
+      :quiesce,
+      reason,
+      continuation.agent_generation,
+      continuation.agent_turn_id,
+      continuation
+    )
+  end
+
+  defp deferred_pause(cause, reason, source_generation, source_turn_id, continuation) do
     %{
+      cause: cause,
       reason: reason,
-      source_generation: Map.fetch!(meta, "agent_generation"),
-      source_turn_id: Map.fetch!(meta, "agent_turn_id"),
-      owner_generation: data.generation,
-      owner_turn_id: data.current_turn.id,
+      source_generation: source_generation,
+      source_turn_id: source_turn_id,
+      owner_generation: continuation.agent_generation,
+      owner_turn_id: continuation.agent_turn_id,
       owner_arc_id: continuation.arc_id,
       owner_correlation_id: continuation.correlation_id
     }
   end
+
+  defp pause_owner_continuation(:running, data), do: data.current_turn.continuation
+
+  defp pause_owner_continuation(state, data)
+       when state in [:waiting_for_user, :awaiting_permission],
+       do: data.gate_turn
 
   defp transfer_deferred_pause(%{deferred_pause: nil} = data), do: data
 
@@ -1135,6 +1253,7 @@ defmodule ObanClaude.Agent.Instance do
         outcome: continuation.outcome,
         outcome_reason: continuation.outcome_reason
       }
+      |> maybe_put_meta(:config_revision, data.config.config_revision)
     )
   end
 
@@ -1176,6 +1295,7 @@ defmodule ObanClaude.Agent.Instance do
     %{agent_id: data.id, from: from, to: to}
     |> Map.merge(context)
     |> put_continuation_identity(continuation)
+    |> maybe_put_meta(:config_revision, data.config.config_revision)
   end
 
   defp put_continuation_identity(meta, nil), do: meta
@@ -1203,7 +1323,7 @@ defmodule ObanClaude.Agent.Instance do
     context =
       extra
       |> Map.merge(%{
-        cause: :pause_after_turn,
+        cause: data.deferred_pause.cause,
         pause_reason: data.deferred_pause.reason,
         pause_action: action,
         agent_generation: data.deferred_pause.owner_generation,
@@ -1241,5 +1361,17 @@ defmodule ObanClaude.Agent.Instance do
               "ObanClaude.Agent config `#{key}` keys must be strings, got #{inspect(bad)}. " <>
                 "Build the map with ObanClaude.Args.defaults/1 (atom keys in, string map out)."
     end
+  end
+
+  defp validate_config_revision!(nil), do: :ok
+
+  defp validate_config_revision!(revision)
+       when is_binary(revision) and byte_size(revision) in 1..256,
+       do: :ok
+
+  defp validate_config_revision!(revision) do
+    raise ArgumentError,
+          ":config_revision must be a non-empty string of at most 256 bytes, got: " <>
+            inspect(revision)
   end
 end

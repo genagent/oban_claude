@@ -95,6 +95,18 @@ defmodule ObanClaude.AgentTest do
 
       assert message =~ "keys must be strings"
     end
+
+    test "config_revision is an optional bounded opaque string" do
+      assert {:error, %ArgumentError{message: message}} =
+               Agent.start_agent("bad-config-revision", config_revision: "")
+
+      assert message =~ ":config_revision must be a non-empty string"
+
+      assert {:error, %ArgumentError{}} =
+               Agent.start_agent("long-config-revision",
+                 config_revision: String.duplicate("x", 257)
+               )
+    end
   end
 
   describe ":idle -> :running" do
@@ -102,7 +114,12 @@ defmodule ObanClaude.AgentTest do
       id = start_agent!()
       assert :processing = Agent.submit_prompt(id, "run deep code audit step")
       assert {:ok, :running} = Agent.status(id)
-      assert_receive {:enqueued, %{"prompt" => "run deep code audit step"}, %{"agent_id" => ^id}}
+
+      assert_receive {:enqueued, %{"prompt" => "run deep code audit step"},
+                      %{"agent_id" => ^id} = meta}
+
+      refute Map.has_key?(meta, "config_revision")
+      assert {:ok, %{config_revision: nil}} = Agent.info(id)
     end
 
     test "application correlation joins job metadata and lifecycle telemetry" do
@@ -124,8 +141,10 @@ defmodule ObanClaude.AgentTest do
 
       on_exit(fn -> :telemetry.detach(handler) end)
 
-      id = start_agent!()
+      id = start_agent!(config_revision: "config-v7")
       correlation_id = "request-42"
+
+      assert {:ok, %{config_revision: "config-v7"}} = Agent.info(id)
 
       assert :processing =
                Agent.submit_prompt(id, "run", correlation_id: correlation_id, arc_id: "operator")
@@ -135,7 +154,8 @@ defmodule ObanClaude.AgentTest do
                         "correlation_id" => ^correlation_id,
                         "agent_generation" => generation,
                         "agent_turn_id" => turn_id,
-                        "arc_id" => "operator"
+                        "arc_id" => "operator",
+                        "config_revision" => "config-v7"
                       } = captured}
 
       assert_receive {:enqueued, %{"prompt" => "run"}, ^captured}
@@ -147,7 +167,8 @@ defmodule ObanClaude.AgentTest do
                         correlation_id: ^correlation_id,
                         agent_generation: ^generation,
                         agent_turn_id: ^turn_id,
-                        arc_id: "operator"
+                        arc_id: "operator",
+                        config_revision: "config-v7"
                       }}
 
       :ok = Agent.job_finished(id, {:ok, result("done")}, captured)
@@ -158,11 +179,17 @@ defmodule ObanClaude.AgentTest do
                         correlation_id: ^correlation_id,
                         agent_generation: ^generation,
                         agent_turn_id: ^turn_id,
-                        arc_id: "operator"
+                        arc_id: "operator",
+                        config_revision: "config-v7"
                       }}
 
       assert_receive {:lifecycle, [:oban_claude, :agent, :transition],
-                      %{from: :running, to: :idle, correlation_id: ^correlation_id}}
+                      %{
+                        from: :running,
+                        to: :idle,
+                        correlation_id: ^correlation_id,
+                        config_revision: "config-v7"
+                      }}
     end
 
     test "config default args ride under the prompt; approved_args do not" do
@@ -1019,6 +1046,155 @@ defmodule ObanClaude.AgentTest do
     end
   end
 
+  describe "quiesce/2" do
+    test "an idle agent pauses atomically and reports an already-paused retry" do
+      handler = "quiesce-idle-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler,
+        [:oban_claude, :agent, :transition],
+        fn _event, _measurements, metadata, _config ->
+          send(test_pid, {:quiesce_transition, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      id = start_agent!(config_revision: "config-idle")
+
+      assert :paused = Agent.quiesce(id, :config_changed)
+      assert :already_paused = Agent.quiesce(id, :another_reason)
+      assert {:ok, %{state: :paused, deferred_pause: nil}} = Agent.info(id)
+
+      assert_receive {:quiesce_transition,
+                      %{
+                        agent_id: ^id,
+                        from: :idle,
+                        to: :paused,
+                        cause: :quiesce,
+                        pause_reason: :config_changed,
+                        pause_action: :applied,
+                        config_revision: "config-idle"
+                      }}
+
+      assert {:ok, history} = Agent.history(id)
+      assert {:quiesced, :config_changed} in history
+      refute {:quiesced, :another_reason} in history
+    end
+
+    test "a running agent keeps the first latch and pauses at completion" do
+      handler = "quiesce-running-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler,
+        [:oban_claude, :agent, :transition],
+        fn _event, _measurements, metadata, _config ->
+          send(test_pid, {:quiesce_transition, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      id = start_agent!(config_revision: "config-running")
+      :processing = Agent.submit_prompt(id, "work")
+      assert_receive {:captured_turn, ^id, meta}
+      assert_receive {:enqueued, _args, ^meta}
+
+      assert :armed = Agent.quiesce(id, :config_changed)
+      assert :armed = Agent.quiesce(id, :ignored_retry_reason)
+
+      assert {:ok,
+              %{
+                deferred_pause: %{
+                  cause: :quiesce,
+                  reason: :config_changed,
+                  source_turn_id: turn_id,
+                  owner_turn_id: turn_id
+                }
+              }} = Agent.info(id)
+
+      assert turn_id == meta["agent_turn_id"]
+
+      :ok = Agent.job_finished(id, {:ok, result("done")}, meta)
+      assert {:ok, :paused} = Agent.await(id, :paused, 1_000)
+
+      assert_receive {:quiesce_transition,
+                      %{
+                        from: :running,
+                        to: :paused,
+                        cause: :quiesce,
+                        pause_reason: :config_changed,
+                        pause_action: :applied,
+                        config_revision: "config-running"
+                      }}
+    end
+
+    test "an existing correlated latch wins over a host quiesce request" do
+      id = start_agent!()
+      :processing = Agent.submit_prompt(id, "work")
+      assert_receive {:captured_turn, ^id, meta}
+      assert_receive {:enqueued, _args, ^meta}
+
+      assert :ok = Agent.pause_after_turn(id, :usage_limit, meta)
+      assert :armed = Agent.quiesce(id, :config_changed)
+
+      assert {:ok,
+              %{
+                deferred_pause: %{
+                  cause: :pause_after_turn,
+                  reason: :usage_limit
+                }
+              }} = Agent.info(id)
+
+      :ok = Agent.job_finished(id, {:ok, result("done")}, meta)
+      assert {:ok, :paused} = Agent.await(id, :paused, 1_000)
+    end
+
+    test "a permission gate survives quiesce and rejection pauses immediately" do
+      id = start_agent!()
+      action_id = block_on_permission!(id)
+
+      assert :armed = Agent.quiesce(id, :config_changed)
+      assert {:ok, {:awaiting_permission, %{id: ^action_id}}} = Agent.status(id)
+      assert {:ok, %{deferred_pause: %{cause: :quiesce}}} = Agent.info(id)
+
+      assert :rejected = Agent.reject_action(id, action_id, "not under the old config")
+      assert {:ok, :paused} = Agent.status(id)
+    end
+
+    test "a question gate survives quiesce and its answer completes before pausing" do
+      id = start_agent!()
+      :processing = Agent.submit_prompt(id, "plan")
+      assert_receive {:captured_turn, ^id, meta}
+      assert_receive {:enqueued, _args, ^meta}
+
+      gated =
+        structured_result(
+          %{"directive" => "ask_user", "question" => "which environment?"},
+          session_id: "session-quiesce-question"
+        )
+
+      :ok = Agent.job_finished(id, {:ok, gated}, meta)
+
+      assert {:ok, {:waiting_for_user, "which environment?"}} =
+               Agent.await(id, :waiting_for_user, 1_000)
+
+      assert :armed = Agent.quiesce(id, :config_changed)
+      assert :processing = Agent.submit_prompt(id, "staging")
+      assert_receive {:captured_turn, ^id, continuation_meta}
+
+      assert_receive {:enqueued, %{"prompt" => "staging", "resume" => "session-quiesce-question"},
+                      ^continuation_meta}
+
+      :ok = Agent.job_finished(id, {:ok, result("deployed")}, continuation_meta)
+      assert {:ok, :paused} = Agent.await(id, :paused, 1_000)
+    end
+  end
+
   describe "pause_after_turn/3" do
     test "validates turn identity and latches idempotently" do
       id = start_agent!()
@@ -1109,6 +1285,128 @@ defmodule ObanClaude.AgentTest do
       :ok = Agent.job_finished(id, {:error, {:cancel, :auth}, error(:auth)}, meta)
 
       assert {:ok, :paused} = Agent.await(id, :paused, 1_000)
+    end
+
+    test "a completed permission turn can be latched while its gate is parked" do
+      id = start_agent!(approved_args: %{"permission_mode" => "accept_edits"})
+      :processing = Agent.submit_prompt(id, "plan")
+      assert_receive {:captured_turn, ^id, meta}
+      assert_receive {:enqueued, _args, ^meta}
+
+      gated =
+        structured_result(
+          %{"directive" => "request_permission", "action" => "edit lib/core.ex"},
+          session_id: "session-late-latch"
+        )
+
+      :ok = Agent.job_finished(id, {:ok, gated}, meta)
+
+      assert {:ok, {:awaiting_permission, %{id: action_id}}} =
+               Agent.await(id, :awaiting_permission, 1_000)
+
+      assert :ok = Agent.pause_after_turn(id, :config_changed, meta)
+      assert :ok = Agent.pause_after_turn(id, :ignored_retry_reason, meta)
+
+      assert {:error, :foreign_generation} =
+               Agent.pause_after_turn(
+                 id,
+                 :config_changed,
+                 Map.put(meta, "agent_generation", "other-generation")
+               )
+
+      assert {:error, :stale_turn} =
+               Agent.pause_after_turn(
+                 id,
+                 :config_changed,
+                 Map.put(meta, "agent_turn_id", "other-turn")
+               )
+
+      assert {:ok,
+              %{
+                deferred_pause: %{
+                  cause: :pause_after_turn,
+                  reason: :config_changed,
+                  source_turn_id: source_turn_id,
+                  owner_turn_id: owner_turn_id
+                }
+              }} = Agent.info(id)
+
+      assert source_turn_id == meta["agent_turn_id"]
+      assert owner_turn_id == meta["agent_turn_id"]
+      assert {:ok, {:awaiting_permission, %{id: ^action_id}}} = Agent.status(id)
+
+      assert :processing = Agent.approve_action(id, action_id)
+      assert_receive {:captured_turn, ^id, continuation_meta}
+      assert_receive {:enqueued, %{"resume" => "session-late-latch"}, ^continuation_meta}
+
+      :ok = Agent.job_finished(id, {:ok, result("edited")}, continuation_meta)
+      assert {:ok, :paused} = Agent.await(id, :paused, 1_000)
+    end
+
+    test "a completed question turn can be latched while its gate is parked" do
+      id = start_agent!()
+      :processing = Agent.submit_prompt(id, "plan")
+      assert_receive {:captured_turn, ^id, meta}
+      assert_receive {:enqueued, _args, ^meta}
+
+      gated =
+        structured_result(
+          %{"directive" => "ask_user", "question" => "which environment?"},
+          session_id: "session-late-question"
+        )
+
+      :ok = Agent.job_finished(id, {:ok, gated}, meta)
+
+      assert {:ok, {:waiting_for_user, "which environment?"}} =
+               Agent.await(id, :waiting_for_user, 1_000)
+
+      assert :ok = Agent.pause_after_turn(id, :config_changed, meta)
+      assert {:ok, {:waiting_for_user, "which environment?"}} = Agent.status(id)
+
+      assert :processing = Agent.submit_prompt(id, "staging")
+      assert_receive {:captured_turn, ^id, continuation_meta}
+
+      assert_receive {:enqueued, %{"prompt" => "staging", "resume" => "session-late-question"},
+                      ^continuation_meta}
+
+      :ok = Agent.job_finished(id, {:ok, result("deployed")}, continuation_meta)
+      assert {:ok, :paused} = Agent.await(id, :paused, 1_000)
+    end
+
+    test "a failed gate continuation enqueue keeps the parked turn correlatable" do
+      id = "late-latch-after-enqueue-fail-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      enqueue_fun = fn args, meta ->
+        if String.starts_with?(args["prompt"], "Approved:") do
+          {:error, :db_down}
+        else
+          send(test_pid, {:captured_turn, id, meta})
+          send(test_pid, {:enqueued, args, meta})
+          {:ok, :queued}
+        end
+      end
+
+      {:ok, _pid} = Agent.start_agent(id, enqueue_fun: enqueue_fun)
+      :processing = Agent.submit_prompt(id, "plan")
+      assert_receive {:captured_turn, ^id, meta}
+      assert_receive {:enqueued, _args, ^meta}
+
+      gated = structured_result(%{"directive" => "request_permission", "action" => "deploy"})
+      :ok = Agent.job_finished(id, {:ok, gated}, meta)
+
+      assert {:ok, {:awaiting_permission, %{id: action_id}}} =
+               Agent.await(id, :awaiting_permission, 1_000)
+
+      assert {:error, {:enqueue_failed, :db_down}} = Agent.approve_action(id, action_id)
+      assert {:ok, {:awaiting_permission, %{id: ^action_id}}} = Agent.status(id)
+
+      assert :ok = Agent.pause_after_turn(id, :config_changed, meta)
+      assert {:ok, %{deferred_pause: %{source_turn_id: source_turn_id}}} = Agent.info(id)
+      assert source_turn_id == meta["agent_turn_id"]
+
+      assert :rejected = Agent.reject_action(id, action_id, "retry under the new config")
+      assert {:ok, :paused} = Agent.status(id)
     end
 
     test "permission gate survives and one approved continuation ends paused" do
