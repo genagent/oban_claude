@@ -46,7 +46,7 @@ for the full config table.
 | `:running` | an Oban job is in flight | postponed until the turn ends |
 | `:waiting_for_user` | the last turn asked a question | consumed as the answer (except `origin: :tick`, which queues) |
 | `:awaiting_permission` | the last turn requested approval | postponed until the gate clears |
-| `:paused` | lockdown via `emergency_pause/1` | refused (calls) or dropped-and-recorded (casts) |
+| `:paused` | lockdown via `emergency_pause/1` or `pause_after_turn/3` | refused (calls) or dropped-and-recorded (casts) |
 
 A `:state_timeout` watchdog (`:job_timeout`, default 60s) guards `:running`
 against a turn that never reports back. Every state change atomically updates
@@ -81,6 +81,53 @@ re-gates -- back to `:awaiting_permission` with the same description and a
 fresh action id, with `{:approval_incomplete, reason}` in history. Because
 the failed turn's session id was captured, a re-approval resumes the
 interrupted work rather than starting over.
+
+## Pause at a safe turn boundary
+
+Hosts that enforce a spend, token, or policy rail often learn that an agent
+must pause while its turn is still running. Calling `emergency_pause/1` at that
+point is too blunt: it deliberately drops action and question gates, and a
+later asynchronous pause can race a postponed prompt through `:idle`.
+
+`pause_after_turn/3` synchronously installs a correlated latch inside the state
+machine before the worker callback can finish the turn:
+
+    :telemetry.attach_many(
+      "daily-spend-rail",
+      [[:oban_claude, :run, :stop], [:oban_claude, :run, :exception]],
+      fn _event, _measurements, %{job: %{meta: %{"agent_id" => id} = job_meta}}, _config ->
+        case ObanClaude.Agent.pause_after_turn(id, :daily_spend, job_meta) do
+          :ok -> :ok
+          {:error, reason} -> Logger.warning("safe-boundary pause refused: #{inspect(reason)}")
+        end
+      end,
+      nil
+    )
+
+The telemetry handler must call `pause_after_turn/3` inline. The worker sends
+its terminal callback only after telemetry handlers return, which gives the
+latch deterministic ordering. Starting another process for the call gives up
+that guarantee.
+
+Treat a returned error as a visible, fail-closed race outcome. Do not raise in
+the handler: telemetry detaches handlers that crash.
+
+Pass the exact job metadata captured at enqueue time. The machine validates the
+agent id, instance generation, and logical turn id atomically. A foreign,
+stale, retired, or malformed identity returns a typed error and changes
+nothing. Repeating the accepted source or current/latest owner identity is
+idempotent; the first pause reason wins.
+
+Ordinary completion, terminal failure, and watchdog expiry now land directly
+in `:paused`, before postponed prompts can run. A permission request or user
+question remains gated. Approving or answering grants one continuation while
+the latch stays active; that continuation pauses when it finishes, or remains
+gated if it requests another action or question. Rejecting a latched permission
+gate records the denial and goes directly to `:paused`.
+
+Retries remain part of the same logical turn and keep the latch. An explicit
+`resume_agent/1` clears it. `emergency_pause/1` remains immediate and clears the
+latch together with all gate scopes.
 
 ## Prompts: sync, async, and options
 
@@ -188,16 +235,24 @@ very turn it should observe as busy, and skip-policy can never fire.
     full status payload. Registry-polling.
   * `list/0` -- every running agent as `{id, status}`, off the registry.
   * `info/1` -- turn count, accumulated cost, default `session_id`, all retained
-    `session_arcs`, current/recent continuation, and pendings (a call;
-    in-process, so the host seeds persisted arcs after restart).
-  * `history/1` -- the bounded event log (`:max_history`, default 500).
+    `session_arcs`, current/recent continuation, pending gates, and the current
+    `deferred_pause` latch (a call; in-process, so the host seeds persisted arcs
+    after restart).
+  * `history/1` -- the bounded event log (`:max_history`, default 500). A safe
+    boundary latch records `{:pause_after_turn, reason}` when accepted and
+    `{:paused_after_turn, reason}` when it is applied.
   * Telemetry: `[:oban_claude, :agent, :transition]` with
     `%{agent_id, from, to}`, and `[:oban_claude, :agent, :turn_completed]`
     with the arc, session, continuation decision, and typed outcome. Pass an
     opaque `correlation_id` to `submit_prompt/3` or `cast_prompt/3` to carry an
     application request identity through postponed delivery, job metadata,
     turn transitions, approval continuations, and completion. Turn events also
-    expose the wrapper-owned `agent_generation` and `agent_turn_id`.
+    expose the wrapper-owned `agent_generation` and `agent_turn_id`. Deferred
+    pause transitions add `cause` (`:pause_after_turn` for the latch,
+    `:emergency_pause` for the immediate brake), `pause_reason`, and
+    `pause_action` (`:continued`, `:applied`, or `:cleared`). Gate transitions
+    also add `gate_outcome` (`:opened`, `:approved`, `:answered`, `:incomplete`,
+    or `:rejected`) and the relevant `action_id` or `question`.
 
 ## Testing without a queue or claude
 
