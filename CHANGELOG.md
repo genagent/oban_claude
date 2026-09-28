@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.2](https://github.com/genagent/oban_claude/compare/v0.7.1...v0.7.2) (2026-09-28)
+
+
+### Bug Fixes
+
+* preserve action gates when pausing after a turn ([#149](https://github.com/genagent/oban_claude/issues/149)) ([079412c](https://github.com/genagent/oban_claude/commit/079412ca2f283055825c37c84f2b37297b183801))
+
 ## [0.7.1](https://github.com/genagent/oban_claude/compare/v0.7.0...v0.7.1) (2026-09-24)
 
 
