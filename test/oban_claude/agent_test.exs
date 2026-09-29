@@ -1061,6 +1061,35 @@ defmodule ObanClaude.AgentTest do
                       }}
     end
 
+    test "emergency pause can retain the host's durable pause provenance" do
+      id = start_agent!()
+
+      context = %{
+        "cause" => "pause_after_turn",
+        "reason" => "daily_spend",
+        "agent_generation" => 17,
+        "agent_turn_id" => 23,
+        "arc_id" => "recovery",
+        "correlation_id" => "spend-rail-42"
+      }
+
+      assert :ok = Agent.emergency_pause(id, context)
+      assert {:ok, :paused} = Agent.await(id, :paused, 1_000)
+
+      assert {:ok,
+              %{
+                pause_context: %{
+                  cause: "pause_after_turn",
+                  pause_reason: "daily_spend",
+                  pause_action: :applied,
+                  agent_generation: 17,
+                  agent_turn_id: 23,
+                  arc_id: "recovery",
+                  correlation_id: "spend-rail-42"
+                }
+              }} = Agent.info(id)
+    end
+
     test "emergency_pause locks the agent from any state; resume_agent releases it" do
       id = start_agent!()
       :processing = Agent.submit_prompt(id, "work")

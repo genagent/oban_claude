@@ -305,6 +305,12 @@ defmodule ObanClaude.Agent do
     with_agent(agent_id, &:gen_statem.cast(&1, :emergency_pause))
   end
 
+  @doc "Asynchronously force the agent into `:paused` while retaining the supplied pause provenance."
+  @spec emergency_pause(agent_id(), map()) :: :ok | {:error, :agent_not_running}
+  def emergency_pause(agent_id, context) when is_map(context) do
+    with_agent(agent_id, &:gen_statem.cast(&1, {:emergency_pause, context}))
+  end
+
   @doc "Release a `:paused` agent back to `:idle`."
   @spec resume_agent(agent_id()) :: :resumed | {:error, term()}
   def resume_agent(agent_id), do: call(agent_id, :resume)

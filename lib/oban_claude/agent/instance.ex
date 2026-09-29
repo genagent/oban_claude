@@ -276,7 +276,11 @@ defmodule ObanClaude.Agent.Instance do
   # does not survive the lockdown; after resume the operator starts clean. An
   # actually in-flight turn retains bookkeeping ownership so its matching
   # outcome can still contribute history, spend, and a session without acting.
-  defp process_event(state, :cast, :emergency_pause, data) when state != :paused do
+  defp process_event(state, :cast, :emergency_pause, data),
+    do: process_event(state, :cast, {:emergency_pause, emergency_pause_context()}, data)
+
+  defp process_event(state, :cast, {:emergency_pause, context}, data)
+       when state != :paused and is_map(context) do
     data = %{
       record(data, {:paused_from, state})
       | pending_action: nil,
@@ -286,12 +290,13 @@ defmodule ObanClaude.Agent.Instance do
         deferred_pause: nil
     }
 
-    data = put_transition_context(data, emergency_pause_context())
+    data = put_transition_context(data, emergency_pause_context(context))
 
     {:next_state, :paused, data}
   end
 
-  defp process_event(:paused, :cast, :emergency_pause, data) do
+  defp process_event(:paused, :cast, {:emergency_pause, context}, data)
+       when is_map(context) do
     data = %{
       data
       | pending_action: nil,
@@ -299,7 +304,7 @@ defmodule ObanClaude.Agent.Instance do
         gate_turn: nil,
         in_flight_approval: nil,
         deferred_pause: nil,
-        pause_context: emergency_pause_context()
+        pause_context: emergency_pause_context(context)
     }
 
     {:keep_state, data}
@@ -1355,6 +1360,34 @@ defmodule ObanClaude.Agent.Instance do
       pause_reason: :emergency_pause,
       pause_action: :applied
     }
+  end
+
+  defp emergency_pause_context(context) do
+    context = normalize_pause_context_keys(context)
+
+    context
+    |> Map.put(:cause, Map.get(context, :cause) || :emergency_pause)
+    |> Map.put(
+      :pause_reason,
+      Map.get(context, :pause_reason) || Map.get(context, :reason) || :emergency_pause
+    )
+    |> Map.put(:pause_action, :applied)
+  end
+
+  @pause_context_keys %{
+    "cause" => :cause,
+    "reason" => :reason,
+    "pause_reason" => :pause_reason,
+    "pause_action" => :pause_action,
+    "agent_generation" => :agent_generation,
+    "agent_turn_id" => :agent_turn_id,
+    "arc_id" => :arc_id,
+    "correlation_id" => :correlation_id
+  }
+  defp normalize_pause_context_keys(context) do
+    Map.new(context, fn {key, value} ->
+      {Map.get(@pause_context_keys, key, key), value}
+    end)
   end
 
   # The registry value `ObanClaude.Agent.status/1` serves: the gated states
