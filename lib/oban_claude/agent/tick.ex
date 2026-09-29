@@ -67,17 +67,18 @@ defmodule ObanClaude.Agent.Tick do
       config :oban_claude, tick_admission: MyApp.TickAdmission
 
       defmodule MyApp.TickAdmission do
-        def admit(:claude, agent_id, expected_revision, deliver) do
-          MyApp.AgentCoordinator.admit(agent_id, expected_revision, deliver)
+        def admit(:claude, agent_id, expected_delivery_revision, deliver) do
+          MyApp.AgentCoordinator.admit(agent_id, expected_delivery_revision, deliver)
         end
       end
 
   The configured module must export `admit/4`. It receives the provider,
-  agent id, the optional `"start.config_revision"`, and a zero-arity function
-  containing the complete status check, offline start, and prompt cast. The
-  callback returns the delivery function's result, or another valid
-  `Oban.Worker` result when admission is refused. Without this configuration,
-  ticks behave exactly as before.
+  agent id, the optional top-level `"delivery_revision"`, and a zero-arity
+  function containing the complete status check, offline start, and prompt
+  cast. For compatibility, a job without `"delivery_revision"` falls back to
+  `"start.config_revision"`. The callback returns the delivery function's
+  result, or another valid `Oban.Worker` result when admission is refused.
+  Without this configuration, ticks behave exactly as before.
 
   `max_attempts: 1`: a tick is a point-in-time beat; retrying a failed one
   later would deliver a stale prompt (and risk a duplicate), so a missed beat
@@ -106,7 +107,7 @@ defmodule ObanClaude.Agent.Tick do
         [origin: :tick, session: %{"resume" => :resume, "fresh" => :fresh}[session]]
         |> maybe_add_arc(arc_id)
 
-      admit(agent_id, config_revision(args), fn ->
+      admit(agent_id, delivery_revision(args), fn ->
         tick(agent_id, prompt, opts, if_busy, if_offline, args)
       end)
     end
@@ -206,10 +207,14 @@ defmodule ObanClaude.Agent.Tick do
     end
   end
 
-  defp config_revision(%{"start" => start}) when is_map(start),
+  defp delivery_revision(%{"delivery_revision" => revision})
+       when is_binary(revision) and revision != "",
+       do: revision
+
+  defp delivery_revision(%{"start" => start}) when is_map(start),
     do: Map.get(start, "config_revision")
 
-  defp config_revision(_args), do: nil
+  defp delivery_revision(_args), do: nil
 
   defp maybe_add_arc(opts, nil), do: opts
   defp maybe_add_arc(opts, arc_id), do: Keyword.put(opts, :arc_id, arc_id)

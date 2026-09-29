@@ -227,6 +227,21 @@ defmodule ObanClaude.Agent.TickTest do
     assert {:ok, :offline} = Agent.status(id)
   end
 
+  test "host admission prefers the delivery revision over the process revision" do
+    id = "delivery-revision-" <> Integer.to_string(System.unique_integer([:positive]))
+    configure_admission(:block)
+
+    assert {:cancel, :host_admission_blocked} =
+             tick(%{
+               "agent_id" => id,
+               "prompt" => "current prompt",
+               "delivery_revision" => "delivery-v2",
+               "start" => %{"config_revision" => "process-v1"}
+             })
+
+    assert_receive {:tick_admission, :claude, ^id, "delivery-v2", true, _callback_pid}
+  end
+
   test "skips a busy agent by default" do
     id = start_agent!()
     :processing = Agent.submit_prompt(id, "long turn")
