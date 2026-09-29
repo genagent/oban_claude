@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0](https://github.com/genagent/oban_claude/compare/v0.7.2...v0.8.0) (2026-09-29)
+
+
+### Features
+
+* expose an atomic live-config boundary (closes [#151](https://github.com/genagent/oban_claude/issues/151)) ([#152](https://github.com/genagent/oban_claude/issues/152)) ([469fbca](https://github.com/genagent/oban_claude/commit/469fbca0cd3a5efa32fab344f5d8cfba03e8f7cd))
+
+
+### Bug Fixes
+
+* harden live-config handoff boundaries ([#154](https://github.com/genagent/oban_claude/issues/154)) ([3de84ab](https://github.com/genagent/oban_claude/commit/3de84abbd15d3341320dc63446ab331973cfe0bf))
+
 ## [0.7.2](https://github.com/genagent/oban_claude/compare/v0.7.1...v0.7.2) (2026-09-28)
 
 
