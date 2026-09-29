@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/genagent/oban_claude/compare/v0.8.0...v0.9.0) (2026-09-29)
+
+
+### Features
+
+* expose strict MCP configuration passthrough (closes [#155](https://github.com/genagent/oban_claude/issues/155)) ([#156](https://github.com/genagent/oban_claude/issues/156)) ([3d63444](https://github.com/genagent/oban_claude/commit/3d634442e087ae4f224ec03c2afdcfd827e5d058))
+
 ## [0.8.0](https://github.com/genagent/oban_claude/compare/v0.7.2...v0.8.0) (2026-09-29)
 
 
