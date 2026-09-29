@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/genagent/oban_claude/compare/v0.9.0...v0.9.1) (2026-09-29)
+
+
+### Bug Fixes
+
+* expose setting_sources through the Oban args boundary (closes [#158](https://github.com/genagent/oban_claude/issues/158)) ([#159](https://github.com/genagent/oban_claude/issues/159)) ([1495852](https://github.com/genagent/oban_claude/commit/14958520c0159de94b0645b29b92e780cb3fbf76))
+
 ## [0.9.0](https://github.com/genagent/oban_claude/compare/v0.8.0...v0.9.0) (2026-09-29)
 
 
