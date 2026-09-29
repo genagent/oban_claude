@@ -265,6 +265,14 @@ restarts self-heal at the next beat), `session` (`"resume"` default /
 (`:ticks`): on a queue shared with agent turns a tick serializes behind the
 very turn it should observe as busy, and skip-policy can never fire.
 
+A host can serialize Tick delivery with its own configuration boundary by
+setting `config :oban_claude, tick_admission: MyApp.TickAdmission`. The module
+must export `admit/4`. It receives `:claude`, the agent id, the optional
+`"start.config_revision"`, and a zero-arity function containing the complete
+status check, offline start, and prompt cast. It must either invoke and return
+that function's result or return another valid `Oban.Worker` result. Without
+this configuration, Tick delivery is unchanged.
+
 ## Observing a fleet
 
   * `status/1` -- one atomic registry read: the state, plus the pending

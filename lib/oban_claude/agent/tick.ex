@@ -59,6 +59,26 @@ defmodule ObanClaude.Agent.Tick do
   A `:paused` agent never receives a tick (`{:cancel, :agent_paused}`) --
   lockdown outranks the schedule, in both `"if_busy"` modes.
 
+  ## Host admission boundary
+
+  A host that coordinates agent configuration or another delivery boundary can
+  wrap the final status/start/deliver decision with an application callback:
+
+      config :oban_claude, tick_admission: MyApp.TickAdmission
+
+      defmodule MyApp.TickAdmission do
+        def admit(:claude, agent_id, expected_revision, deliver) do
+          MyApp.AgentCoordinator.admit(agent_id, expected_revision, deliver)
+        end
+      end
+
+  The configured module must export `admit/4`. It receives the provider,
+  agent id, the optional `"start.config_revision"`, and a zero-arity function
+  containing the complete status check, offline start, and prompt cast. The
+  callback returns the delivery function's result, or another valid
+  `Oban.Worker` result when admission is refused. Without this configuration,
+  ticks behave exactly as before.
+
   `max_attempts: 1`: a tick is a point-in-time beat; retrying a failed one
   later would deliver a stale prompt (and risk a duplicate), so a missed beat
   is simply missed. The cancels are visible per-beat in the `oban_jobs` table.
@@ -86,7 +106,30 @@ defmodule ObanClaude.Agent.Tick do
         [origin: :tick, session: %{"resume" => :resume, "fresh" => :fresh}[session]]
         |> maybe_add_arc(arc_id)
 
-      tick(agent_id, prompt, opts, if_busy, if_offline, args)
+      admit(agent_id, config_revision(args), fn ->
+        tick(agent_id, prompt, opts, if_busy, if_offline, args)
+      end)
+    end
+  end
+
+  defp admit(agent_id, expected_revision, deliver) do
+    case Application.get_env(:oban_claude, :tick_admission) do
+      nil ->
+        deliver.()
+
+      module when is_atom(module) ->
+        if Code.ensure_loaded?(module) and function_exported?(module, :admit, 4) do
+          module.admit(:claude, agent_id, expected_revision, deliver)
+        else
+          raise ArgumentError,
+                ":oban_claude, :tick_admission must name a module exporting admit/4, got: " <>
+                  inspect(module)
+        end
+
+      invalid ->
+        raise ArgumentError,
+              ":oban_claude, :tick_admission must be a module or nil, got: " <>
+                inspect(invalid)
     end
   end
 
@@ -162,6 +205,11 @@ defmodule ObanClaude.Agent.Tick do
       value -> {:cancel, {:invalid_tick, "invalid \"arc_id\" #{inspect(value)}"}}
     end
   end
+
+  defp config_revision(%{"start" => start}) when is_map(start),
+    do: Map.get(start, "config_revision")
+
+  defp config_revision(_args), do: nil
 
   defp maybe_add_arc(opts, nil), do: opts
   defp maybe_add_arc(opts, arc_id), do: Keyword.put(opts, :arc_id, arc_id)
