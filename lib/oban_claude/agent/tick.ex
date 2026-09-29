@@ -59,6 +59,29 @@ defmodule ObanClaude.Agent.Tick do
   A `:paused` agent never receives a tick (`{:cancel, :agent_paused}`) --
   lockdown outranks the schedule, in both `"if_busy"` modes.
 
+  ## Host admission boundary
+
+  A host that coordinates agent configuration or another delivery boundary can
+  wrap the final status/start/deliver decision with an application callback:
+
+      config :oban_claude, tick_admission: MyApp.TickAdmission
+
+      defmodule MyApp.TickAdmission do
+        def admit(:claude, agent_id, expected_delivery_revision, context, deliver) do
+          MyApp.AgentCoordinator.admit(agent_id, expected_delivery_revision, context, deliver)
+        end
+      end
+
+  The configured module may export `admit/5`. It receives the provider, agent
+  id, the optional top-level `"delivery_revision"`, a context map containing
+  the optional `:arc_id`, and a zero-arity function containing the complete
+  status check, offline start, and prompt cast. An existing `admit/4` callback
+  remains supported without the context argument. For compatibility, a job
+  without `"delivery_revision"` falls back to `"start.config_revision"`. The
+  callback returns the delivery function's result, or another valid
+  `Oban.Worker` result when admission is refused. Without this configuration,
+  ticks behave exactly as before.
+
   `max_attempts: 1`: a tick is a point-in-time beat; retrying a failed one
   later would deliver a stale prompt (and risk a duplicate), so a missed beat
   is simply missed. The cancels are visible per-beat in the `oban_jobs` table.
@@ -86,7 +109,37 @@ defmodule ObanClaude.Agent.Tick do
         [origin: :tick, session: %{"resume" => :resume, "fresh" => :fresh}[session]]
         |> maybe_add_arc(arc_id)
 
-      tick(agent_id, prompt, opts, if_busy, if_offline, args)
+      admit(agent_id, delivery_revision(args), %{arc_id: arc_id}, fn ->
+        tick(agent_id, prompt, opts, if_busy, if_offline, args)
+      end)
+    end
+  end
+
+  defp admit(agent_id, expected_revision, context, deliver) do
+    case Application.get_env(:oban_claude, :tick_admission) do
+      nil ->
+        deliver.()
+
+      module when is_atom(module) ->
+        Code.ensure_loaded?(module)
+
+        cond do
+          function_exported?(module, :admit, 5) ->
+            module.admit(:claude, agent_id, expected_revision, context, deliver)
+
+          function_exported?(module, :admit, 4) ->
+            module.admit(:claude, agent_id, expected_revision, deliver)
+
+          true ->
+            raise ArgumentError,
+                  ":oban_claude, :tick_admission must name a module exporting admit/5 or admit/4, got: " <>
+                    inspect(module)
+        end
+
+      invalid ->
+        raise ArgumentError,
+              ":oban_claude, :tick_admission must be a module or nil, got: " <>
+                inspect(invalid)
     end
   end
 
@@ -162,6 +215,15 @@ defmodule ObanClaude.Agent.Tick do
       value -> {:cancel, {:invalid_tick, "invalid \"arc_id\" #{inspect(value)}"}}
     end
   end
+
+  defp delivery_revision(%{"delivery_revision" => revision})
+       when is_binary(revision) and revision != "",
+       do: revision
+
+  defp delivery_revision(%{"start" => start}) when is_map(start),
+    do: Map.get(start, "config_revision")
+
+  defp delivery_revision(_args), do: nil
 
   defp maybe_add_arc(opts, nil), do: opts
   defp maybe_add_arc(opts, arc_id), do: Keyword.put(opts, :arc_id, arc_id)

@@ -141,12 +141,15 @@ host does not need a racy `status/1` read followed by a pause:
       :paused -> restart_with_new_config()
       :armed -> wait_until_paused_then_restart()
       :already_paused -> restart_with_new_config()
+      :draining -> wait_for_turn_then_retry_quiesce()
     end
 
 An idle agent pauses immediately. A running agent finishes its turn. A gated
 agent retains its question or permission and allows the continuation before
 pausing; rejecting a pending permission pauses immediately. Existing latches
-are left in place, so the first reason wins. `quiesce/2` emits the same
+are left in place, so the first reason wins. `:draining` is not a replacement
+boundary: an emergency-paused turn still owns physical work, and the host must
+retry after its terminal callback retires that turn. `quiesce/2` emits the same
 `pause_reason` and `pause_action` transition fields with `cause: :quiesce`.
 
 An optional `config_revision` on `start_agent/2` identifies the immutable host
@@ -265,6 +268,14 @@ restarts self-heal at the next beat), `session` (`"resume"` default /
 (`:ticks`): on a queue shared with agent turns a tick serializes behind the
 very turn it should observe as busy, and skip-policy can never fire.
 
+A host can serialize Tick delivery with its own configuration boundary by
+setting `config :oban_claude, tick_admission: MyApp.TickAdmission`. The module
+must export `admit/4`. It receives `:claude`, the agent id, the optional
+`"start.config_revision"`, and a zero-arity function containing the complete
+status check, offline start, and prompt cast. It must either invoke and return
+that function's result or return another valid `Oban.Worker` result. Without
+this configuration, Tick delivery is unchanged.
+
 ## Observing a fleet
 
   * `status/1` -- one atomic registry read: the state, plus the pending
@@ -275,8 +286,9 @@ very turn it should observe as busy, and skip-policy can never fire.
   * `info/1` -- applied `config_revision`, turn count, accumulated cost,
     default `session_id`, all retained
     `session_arcs`, current/recent continuation, pending gates, and the current
-    `deferred_pause` latch (a call; in-process, so the host seeds persisted arcs
-    after restart).
+    `deferred_pause` latch. While paused, `pause_context` retains the cause,
+    reason, action, and any correlated turn identity that applied the pause (a
+    call; in-process, so the host seeds persisted arcs after restart).
   * `history/1` -- the bounded event log (`:max_history`, default 500). A safe
     boundary latch records `{:pause_after_turn, reason}` when accepted and
     `{:paused_after_turn, reason}` when it is applied. A host boundary records

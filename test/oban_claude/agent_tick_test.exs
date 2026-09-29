@@ -37,6 +37,28 @@ defmodule ObanClaude.Agent.TickTest do
       replace: [available: [:meta]]
   end
 
+  defmodule TickAdmission do
+    def admit(provider, agent_id, expected_revision, context, deliver) do
+      test_pid = Application.fetch_env!(:oban_claude, :tick_admission_test_pid)
+      send(test_pid, {:tick_admission_context, context})
+      admit(provider, agent_id, expected_revision, deliver)
+    end
+
+    def admit(provider, agent_id, expected_revision, deliver) do
+      test_pid = Application.fetch_env!(:oban_claude, :tick_admission_test_pid)
+
+      send(
+        test_pid,
+        {:tick_admission, provider, agent_id, expected_revision, is_function(deliver, 0), self()}
+      )
+
+      case Application.fetch_env!(:oban_claude, :tick_admission_test_mode) do
+        :allow -> deliver.()
+        :block -> {:cancel, :host_admission_blocked}
+      end
+    end
+  end
+
   defmodule UnpersistedEngine do
     @behaviour Oban.Engine
 
@@ -116,6 +138,26 @@ defmodule ObanClaude.Agent.TickTest do
   end
 
   setup do
+    admission_keys = [
+      :tick_admission,
+      :tick_admission_test_pid,
+      :tick_admission_test_mode
+    ]
+
+    previous_admission =
+      Map.new(admission_keys, fn key ->
+        {key, Application.fetch_env(:oban_claude, key)}
+      end)
+
+    Enum.each(admission_keys, &Application.delete_env(:oban_claude, &1))
+
+    on_exit(fn ->
+      Enum.each(previous_admission, fn
+        {key, {:ok, value}} -> Application.put_env(:oban_claude, key, value)
+        {key, :error} -> Application.delete_env(:oban_claude, key)
+      end)
+    end)
+
     start_supervised!(ObanClaude.Agent.Supervisor)
     Repo.delete_all(from(j in "oban_jobs", select: j.id))
     :ok
@@ -147,11 +189,73 @@ defmodule ObanClaude.Agent.TickTest do
 
   defp tick(args), do: Tick.perform(%Oban.Job{args: args})
 
+  defp configure_admission(mode) do
+    Application.put_env(:oban_claude, :tick_admission, TickAdmission)
+    Application.put_env(:oban_claude, :tick_admission_test_pid, self())
+    Application.put_env(:oban_claude, :tick_admission_test_mode, mode)
+  end
+
   test "delivers to an :idle agent" do
     id = start_agent!()
     assert :ok = tick(%{"agent_id" => id, "prompt" => "beat"})
     assert {:ok, :running} = Agent.await(id, :running, 1_000)
     assert_receive {:enqueued, %{"prompt" => "beat"}, %{"agent_id" => ^id}}
+  end
+
+  test "a host admission callback wraps live delivery" do
+    id = start_agent!()
+    configure_admission(:allow)
+
+    assert :ok = tick(%{"agent_id" => id, "prompt" => "admitted beat"})
+
+    assert_receive {:tick_admission, :claude, ^id, nil, true, callback_pid}
+    assert callback_pid == self()
+    assert_receive {:enqueued, %{"prompt" => "admitted beat"}, %{"agent_id" => ^id}}
+  end
+
+  test "a host admission callback can refuse before an offline start" do
+    id = "blocked-start-" <> Integer.to_string(System.unique_integer([:positive]))
+    configure_admission(:block)
+
+    assert {:cancel, :host_admission_blocked} =
+             tick(%{
+               "agent_id" => id,
+               "prompt" => "blocked beat",
+               "if_offline" => "start",
+               "start" => %{
+                 "args" => %{"model" => "haiku"},
+                 "config_revision" => "expected-config-v4"
+               }
+             })
+
+    assert_receive {:tick_admission, :claude, ^id, "expected-config-v4", true, callback_pid}
+    assert callback_pid == self()
+    assert {:ok, :offline} = Agent.status(id)
+  end
+
+  test "host admission prefers the delivery revision over the process revision" do
+    id = "delivery-revision-" <> Integer.to_string(System.unique_integer([:positive]))
+    configure_admission(:block)
+
+    assert {:cancel, :host_admission_blocked} =
+             tick(%{
+               "agent_id" => id,
+               "prompt" => "current prompt",
+               "delivery_revision" => "delivery-v2",
+               "start" => %{"config_revision" => "process-v1"}
+             })
+
+    assert_receive {:tick_admission, :claude, ^id, "delivery-v2", true, _callback_pid}
+  end
+
+  test "host admission receives the exact conversation arc context" do
+    id = "arc-context-" <> Integer.to_string(System.unique_integer([:positive]))
+    configure_admission(:block)
+
+    assert {:cancel, :host_admission_blocked} =
+             tick(%{"agent_id" => id, "prompt" => "beat", "arc_id" => "scheduled:arc-1"})
+
+    assert_receive {:tick_admission_context, %{arc_id: "scheduled:arc-1"}}
   end
 
   test "skips a busy agent by default" do

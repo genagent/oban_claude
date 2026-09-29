@@ -291,18 +291,28 @@ defmodule ObanClaude.Agent do
   retained, so the first reason wins.
 
   Returns `:paused` when the boundary was immediate, `:armed` when a deferred
-  pause is active, or `:already_paused` when the agent was already paused.
-  Unlike `pause_after_turn/3`, this host operation needs no captured turn
-  identity because the state machine selects its current boundary atomically.
+  pause is active, or `:already_paused` when the agent was already paused at a
+  safe boundary. `:draining` means the lifecycle is paused but a turn retained
+  by an emergency pause has not reported its terminal outcome yet; the caller
+  must not replace the process and should retry `quiesce/2` after the turn
+  drains. Unlike `pause_after_turn/3`, this host operation needs no captured
+  turn identity because the state machine selects its current boundary
+  atomically.
   """
   @spec quiesce(agent_id(), pause_reason()) ::
-          :paused | :armed | :already_paused | {:error, term()}
+          :paused | :armed | :already_paused | :draining | {:error, term()}
   def quiesce(agent_id, reason), do: call(agent_id, {:quiesce, reason})
 
   @doc "Asynchronously force the agent into `:paused` lockdown, from any state. Drops any pending action or question."
   @spec emergency_pause(agent_id()) :: :ok | {:error, :agent_not_running}
   def emergency_pause(agent_id) do
     with_agent(agent_id, &:gen_statem.cast(&1, :emergency_pause))
+  end
+
+  @doc "Synchronously force the agent into `:paused` and acknowledge retained pause provenance."
+  @spec emergency_pause(agent_id(), map()) :: :ok | {:error, :agent_not_running}
+  def emergency_pause(agent_id, context) when is_map(context) do
+    call(agent_id, {:emergency_pause, context})
   end
 
   @doc "Release a `:paused` agent back to `:idle`."
@@ -314,7 +324,8 @@ defmodule ObanClaude.Agent do
   arc handle; `:session_arcs`, `:active_arc_id`, and `:continuation` expose the
   named-arc state and the current or most recent fresh/resume decision. Also
   includes `:state`, `:turns`, accumulated `:cost_usd`, the applied opaque
-  `:config_revision`, and any pending gate.
+  `:config_revision`, any pending gate, the active `:deferred_pause` latch,
+  and the applied `:pause_context` while the agent is paused.
   """
   @spec info(agent_id()) :: {:ok, map()} | {:error, :agent_not_running}
   def info(agent_id), do: call(agent_id, :info)
