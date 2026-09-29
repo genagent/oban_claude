@@ -71,6 +71,11 @@ defmodule ObanClaude.CLI do
         help: ~S|Seal ambient config: "full", "project", or "true" (alias for full).|
       )
 
+      option(:setting_sources,
+        type: :string,
+        help: ~S|Comma-separated setting sources to load, e.g. "project,local".|
+      )
+
       option(:add_dir, type: :string, multi: true, help: "Extra accessible dir (repeatable).")
       option(:allowed_tools, type: :string, multi: true, help: "Allowed tool (repeatable).")
       option(:disallowed_tools, type: :string, multi: true, help: "Disallowed tool (repeatable).")

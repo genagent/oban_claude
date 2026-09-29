@@ -140,6 +140,30 @@ defmodule ObanClaudeTest do
       refute "--strict-mcp-config" in ambient_args
     end
 
+    test "passes setting_sources unchanged and explicit sources override a hermetic preset" do
+      pid = self()
+
+      qf = fn prompt, opts ->
+        query_args = prompt |> Query.new() |> Query.apply_opts(opts) |> Query.build_args()
+        send(pid, {:setting_sources, opts[:setting_sources], query_args})
+        {:ok, %Result{result: "", is_error: false}}
+      end
+
+      ObanClaude.run(
+        %{
+          "prompt" => "keep repository config",
+          "hermetic" => "full",
+          "setting_sources" => "project,local"
+        },
+        query_fun: qf
+      )
+
+      assert_received {:setting_sources, "project,local", args}
+      source_flag_index = Enum.find_index(args, &(&1 == "--setting-sources"))
+      assert is_integer(source_flag_index)
+      assert Enum.at(args, source_flag_index + 1) == "project,local"
+    end
+
     test "coerces permission_mode from a JSON string to the atom claude expects" do
       pid = self()
 

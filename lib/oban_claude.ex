@@ -123,7 +123,8 @@ defmodule ObanClaude do
   # deliberately excluded: `--continue` resumes the host's *most recent* session,
   # which cross-contaminates under concurrent workers; use explicit `resume:`.
   # The `*_file` / `permission_prompt_tool` / `max_thinking_tokens` /
-  # `strict_mcp_config` keys are the one-shot query flags claude_wrapper 0.14.0
+  # `strict_mcp_config` / `setting_sources` keys are the one-shot query flags
+  # claude_wrapper 0.14.0
   # exposed: prompt-from-file (dodges ARG_MAX on a large system prompt), a custom
   # permission-gating MCP tool, a thinking-token cap, and an MCP-only config
   # seal. All are JSON-clean strings/ints/booleans, so no coercion.
@@ -135,7 +136,7 @@ defmodule ObanClaude do
                   allowed_tools disallowed_tools mcp_config effort agent worktree hermetic
                   binary resume session_id no_session_persistence fork_session
                   system_prompt_file append_system_prompt_file permission_prompt_tool
-                  max_thinking_tokens strict_mcp_config)
+                  max_thinking_tokens strict_mcp_config setting_sources)
 
   # String key -> atom key, resolved at COMPILE time so the atoms always exist.
   # `String.to_existing_atom/1` would depend on ClaudeWrapper.Query (the module
