@@ -38,6 +38,12 @@ defmodule ObanClaude.Agent.TickTest do
   end
 
   defmodule TickAdmission do
+    def admit(provider, agent_id, expected_revision, context, deliver) do
+      test_pid = Application.fetch_env!(:oban_claude, :tick_admission_test_pid)
+      send(test_pid, {:tick_admission_context, context})
+      admit(provider, agent_id, expected_revision, deliver)
+    end
+
     def admit(provider, agent_id, expected_revision, deliver) do
       test_pid = Application.fetch_env!(:oban_claude, :tick_admission_test_pid)
 
@@ -240,6 +246,16 @@ defmodule ObanClaude.Agent.TickTest do
              })
 
     assert_receive {:tick_admission, :claude, ^id, "delivery-v2", true, _callback_pid}
+  end
+
+  test "host admission receives the exact conversation arc context" do
+    id = "arc-context-" <> Integer.to_string(System.unique_integer([:positive]))
+    configure_admission(:block)
+
+    assert {:cancel, :host_admission_blocked} =
+             tick(%{"agent_id" => id, "prompt" => "beat", "arc_id" => "scheduled:arc-1"})
+
+    assert_receive {:tick_admission_context, %{arc_id: "scheduled:arc-1"}}
   end
 
   test "skips a busy agent by default" do

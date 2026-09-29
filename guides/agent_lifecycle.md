@@ -141,12 +141,15 @@ host does not need a racy `status/1` read followed by a pause:
       :paused -> restart_with_new_config()
       :armed -> wait_until_paused_then_restart()
       :already_paused -> restart_with_new_config()
+      :draining -> wait_for_turn_then_retry_quiesce()
     end
 
 An idle agent pauses immediately. A running agent finishes its turn. A gated
 agent retains its question or permission and allows the continuation before
 pausing; rejecting a pending permission pauses immediately. Existing latches
-are left in place, so the first reason wins. `quiesce/2` emits the same
+are left in place, so the first reason wins. `:draining` is not a replacement
+boundary: an emergency-paused turn still owns physical work, and the host must
+retry after its terminal callback retires that turn. `quiesce/2` emits the same
 `pause_reason` and `pause_action` transition fields with `cause: :quiesce`.
 
 An optional `config_revision` on `start_agent/2` identifies the immutable host

@@ -1090,6 +1090,43 @@ defmodule ObanClaude.AgentTest do
               }} = Agent.info(id)
     end
 
+    test "contextual emergency pause acknowledges provenance before returning" do
+      id = start_agent!()
+      :ok = Agent.emergency_pause(id)
+      assert {:ok, :paused} = Agent.await(id, :paused, 1_000)
+
+      context = %{cause: :pause_after_turn, reason: :durable_pause}
+      [{pid, _}] = Registry.lookup(ObanClaude.Agent.Registry, id)
+      :ok = :sys.suspend(pid)
+      test_pid = self()
+
+      task =
+        Task.async(fn ->
+          send(test_pid, :context_pause_started)
+          Agent.emergency_pause(id, context)
+        end)
+
+      assert_receive :context_pause_started
+
+      try do
+        assert Task.yield(task, 50) == nil
+      after
+        :ok = :sys.resume(pid)
+      end
+
+      assert :ok = Task.await(task, 1_000)
+
+      assert {:ok,
+              %{
+                state: :paused,
+                pause_context: %{
+                  cause: :pause_after_turn,
+                  pause_reason: :durable_pause,
+                  pause_action: :applied
+                }
+              }} = Agent.info(id)
+    end
+
     test "emergency_pause locks the agent from any state; resume_agent releases it" do
       id = start_agent!()
       :processing = Agent.submit_prompt(id, "work")
@@ -1169,6 +1206,24 @@ defmodule ObanClaude.AgentTest do
       assert {:ok, history} = Agent.history(id)
       assert {:quiesced, :config_changed} in history
       refute {:quiesced, :another_reason} in history
+    end
+
+    test "reports draining until an emergency-paused turn retires" do
+      id = start_agent!()
+      :processing = Agent.submit_prompt(id, "work")
+      assert_receive {:captured_turn, ^id, meta}
+      assert_receive {:enqueued, _args, ^meta}
+
+      :ok = Agent.emergency_pause(id)
+      assert {:ok, :paused} = Agent.await(id, :paused, 1_000)
+      assert :draining = Agent.quiesce(id, :config_changed)
+
+      assert :resumed = Agent.resume_agent(id)
+      assert :draining = Agent.quiesce(id, :config_changed)
+      assert {:ok, :paused} = Agent.status(id)
+
+      :ok = Agent.job_finished(id, {:ok, result("done")}, meta)
+      assert :already_paused = Agent.quiesce(id, :config_changed)
     end
 
     test "a running agent keeps the first latch and pauses at completion" do
