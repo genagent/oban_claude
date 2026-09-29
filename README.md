@@ -68,6 +68,12 @@ options outside that set (e.g. `env`) are not forwarded, and unknown raw-map key
 are silently ignored. Args are JSON, so atom-valued options are given as strings:
 `permission_mode` is `"bypass_permissions"`, coerced to the atom for you.
 
+`strict_mcp_config: true` is the narrow MCP-only seal: Claude uses only servers
+supplied through `mcp_config`. It does not suppress ambient hooks, instructions
+or other settings. Use `hermetic: :full` when a run must ignore the host's user,
+project and local config as a whole; the hermetic preset includes strict MCP
+behavior.
+
 In `handle_result/2`, `ObanClaude.outcome/1` reads the `"outcome"` key of a
 `--json-schema` run's structured output; `ObanClaude.structured/1` returns the
 whole validated object.

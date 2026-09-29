@@ -56,6 +56,13 @@ defmodule ObanClaude.Args do
     allowed_tools: [type: {:list, :string}, doc: "Whitelist of tools claude may use."],
     disallowed_tools: [type: {:list, :string}, doc: "Blacklist of tools claude may not use."],
     mcp_config: [type: {:list, :string}, doc: "MCP server config file paths."],
+    strict_mcp_config: [
+      type: :boolean,
+      doc:
+        "Use only MCP servers supplied through `mcp_config` " <>
+          "(`--strict-mcp-config`). This seals MCP discovery only; use `hermetic` " <>
+          "when the run must also exclude ambient hooks, instructions and settings."
+    ],
     agent: [type: :string, doc: "Named agent/subagent to run as."],
     effort: [
       type: {:in, [:low, :medium, :high, :xhigh, :max]},
