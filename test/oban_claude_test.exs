@@ -1,7 +1,7 @@
 defmodule ObanClaudeTest do
   use ExUnit.Case, async: true
 
-  alias ClaudeWrapper.{Error, Result}
+  alias ClaudeWrapper.{Error, Query, Result}
   alias ObanClaude.Outcome
 
   describe "Outcome.classify/1" do
@@ -119,6 +119,25 @@ defmodule ObanClaudeTest do
 
       assert_received {:opts, opts}
       refute Keyword.has_key?(opts, :not_an_option)
+    end
+
+    test "passes strict_mcp_config from raw args and false does not enable the CLI flag" do
+      pid = self()
+
+      qf = fn prompt, opts ->
+        query_args = prompt |> Query.new() |> Query.apply_opts(opts) |> Query.build_args()
+        send(pid, {:strict_mcp_config, opts[:strict_mcp_config], query_args})
+        {:ok, %Result{result: "", is_error: false}}
+      end
+
+      ObanClaude.run(%{"prompt" => "sealed", "strict_mcp_config" => true}, query_fun: qf)
+      ObanClaude.run(%{"prompt" => "ambient", "strict_mcp_config" => false}, query_fun: qf)
+
+      assert_received {:strict_mcp_config, true, sealed_args}
+      assert "--strict-mcp-config" in sealed_args
+
+      assert_received {:strict_mcp_config, false, ambient_args}
+      refute "--strict-mcp-config" in ambient_args
     end
 
     test "coerces permission_mode from a JSON string to the atom claude expects" do

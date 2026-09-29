@@ -185,6 +185,26 @@ defmodule ObanClaude.ArgsTest do
     end
   end
 
+  describe "strict_mcp_config" do
+    test "accepts true and false without changing their JSON values" do
+      assert Args.new(prompt: "x", strict_mcp_config: true)["strict_mcp_config"] == true
+      assert Args.new(prompt: "x", strict_mcp_config: false)["strict_mcp_config"] == false
+    end
+
+    test "is available in defaults/1 for a per-worker MCP-only seal" do
+      assert Args.defaults(mcp_config: ["/mcp.json"], strict_mcp_config: true) == %{
+               "mcp_config" => ["/mcp.json"],
+               "strict_mcp_config" => true
+             }
+    end
+
+    test "rejects a non-boolean value" do
+      assert_raise NimbleOptions.ValidationError, ~r/invalid value for :strict_mcp_config/, fn ->
+        Args.new(prompt: "x", strict_mcp_config: "true")
+      end
+    end
+  end
+
   describe "session continuity (#73)" do
     test "resume/session_id accept strings; the two flags accept booleans" do
       args =
@@ -256,6 +276,7 @@ defmodule ObanClaude.ArgsTest do
         allowed_tools: ["Read"],
         disallowed_tools: ["WebFetch"],
         mcp_config: ["/mcp.json"],
+        strict_mcp_config: true,
         agent: "reviewer",
         effort: :high,
         max_turns: 3,
