@@ -43,6 +43,12 @@ defmodule ObanClaude.CLITest do
       assert CLI.to_args(%{prompt: "x", hermetic: "true"})["hermetic"] == true
     end
 
+    test "passes --setting-sources through unchanged" do
+      assert CLI.to_args(%{prompt: "x", setting_sources: "project,local"})[
+               "setting_sources"
+             ] == "project,local"
+    end
+
     test "carries the session keys through" do
       args =
         CLI.to_args(%{
@@ -133,6 +139,20 @@ defmodule ObanClaude.CLITest do
       decoded = :json.decode(String.trim(result.output))
       assert decoded["prompt"] == "hi"
       assert decoded["max_turns"] == 3
+    end
+
+    test "`args` accepts --setting-sources" do
+      result =
+        Cheer.Test.run(RootTask, [
+          "args",
+          "hi",
+          "--setting-sources",
+          "project,local",
+          "--json"
+        ])
+
+      assert result.return == :ok
+      assert :json.decode(String.trim(result.output))["setting_sources"] == "project,local"
     end
 
     test "a bare invocation is a usage failure (a subcommand is required)" do

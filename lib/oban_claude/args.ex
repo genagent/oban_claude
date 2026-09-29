@@ -86,6 +86,14 @@ defmodule ObanClaude.Args do
           "Requires `working_dir` to be a git repo. Recommended for full-auto workers " <>
           "that write to a repo -- set it in `defaults/1`."
     ],
+    setting_sources: [
+      type: :string,
+      doc:
+        "Comma-separated Claude setting sources to load (`user`, `project`, " <>
+          "and/or `local`). For example, `\"project,local\"` keeps repository " <>
+          "instructions and settings while excluding the user's global config. " <>
+          "Unlike `hermetic`, this controls only setting-source discovery."
+    ],
     hermetic: [
       type: {:in, [:full, :project, true]},
       doc:

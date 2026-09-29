@@ -185,6 +185,26 @@ defmodule ObanClaude.ArgsTest do
     end
   end
 
+  describe "setting_sources" do
+    test "preserves the comma-separated source list" do
+      assert Args.new(prompt: "x", setting_sources: "project,local")["setting_sources"] ==
+               "project,local"
+    end
+
+    test "is available in defaults/1 for per-worker source selection" do
+      assert Args.defaults(working_dir: "/repo", setting_sources: "project,local") == %{
+               "working_dir" => "/repo",
+               "setting_sources" => "project,local"
+             }
+    end
+
+    test "rejects a non-string value" do
+      assert_raise NimbleOptions.ValidationError, ~r/invalid value for :setting_sources/, fn ->
+        Args.new(prompt: "x", setting_sources: [:project, :local])
+      end
+    end
+  end
+
   describe "strict_mcp_config" do
     test "accepts true and false without changing their JSON values" do
       assert Args.new(prompt: "x", strict_mcp_config: true)["strict_mcp_config"] == true
@@ -284,6 +304,7 @@ defmodule ObanClaude.ArgsTest do
         timeout: 60_000,
         json_schema: ~s({"type":"object"}),
         worktree: "issue-5",
+        setting_sources: "project,local",
         hermetic: :full,
         resume: "sess-1",
         session_id: "sess-2",

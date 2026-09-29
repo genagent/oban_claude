@@ -74,6 +74,13 @@ or other settings. Use `hermetic: :full` when a run must ignore the host's user,
 project and local config as a whole; the hermetic preset includes strict MCP
 behavior.
 
+Use `setting_sources: "project,local"` when a run should keep checked-in project
+instructions and local project settings while excluding the user's global
+Claude configuration. `setting_sources` selects which configuration layers
+Claude loads; it does not enable the other protections bundled by `hermetic`.
+An explicit `setting_sources` value wins over the setting-source default of a
+`hermetic` preset, while the preset's other protections still apply.
+
 In `handle_result/2`, `ObanClaude.outcome/1` reads the `"outcome"` key of a
 `--json-schema` run's structured output; `ObanClaude.structured/1` returns the
 whole validated object.
