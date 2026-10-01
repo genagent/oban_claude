@@ -24,7 +24,7 @@ call that returns a typed `%ClaudeWrapper.Result{}` / `%ClaudeWrapper.Error{}`.
 def deps do
   [
     {:oban, "~> 2.23"},
-    {:oban_claude, "~> 0.7.1"}
+    {:oban_claude, "~> 0.9.2"}
   ]
 end
 ```
