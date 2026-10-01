@@ -6,9 +6,8 @@ defmodule ObanClaude.IntegrationTest do
   #   * a transient `{:error, _}` verdict (the default `:timeout` mapping) retries
   #     WITHOUT growing `max_attempts` -- so the retry budget is bounded, which is
   #     what `ObanClaude.Outcome`'s "cancel vs retry" rationale leans on;
-  #   * a `{:snooze, _}` verdict lands `scheduled` and INCREMENTS `max_attempts`
-  #     -- i.e. a snooze does not consume an attempt, the fact the "never snooze a
-  #     deterministically-failing run" default is designed around.
+  #   * a `{:snooze, _}` verdict lands `scheduled` without consuming an attempt.
+  #     Oban 2.23 extends `max_attempts`; Oban 2.24 rolls back `attempt` instead.
   #
   # Snooze/attempt accounting has shifted across Oban 2.x; this test fails loudly
   # if a claude_wrapper- or Oban-version bump regresses it.
@@ -124,14 +123,20 @@ defmodule ObanClaude.IntegrationTest do
     assert row.max_attempts == 3
   end
 
-  test "a {:snooze, n} verdict schedules the job and increments max_attempts (snooze != attempt)" do
+  test "a {:snooze, n} verdict schedules the job without consuming an attempt" do
     {:ok, job} = Oban.insert(@oban, SnoozeWorker.new(%{"prompt" => "x"}))
     row = wait_until_settled(job.id)
 
     assert row.state == "scheduled"
-    # the load-bearing invariant: snooze grows the budget, so it does not burn an
-    # attempt -- the exact behavior the default "never snooze" mapping avoids.
-    assert row.max_attempts == 4
+    # Both supported Oban versions preserve the retry budget, with different
+    # accounting: 2.24 rolls back the attempt; 2.23 extends max_attempts.
+    if Version.match?(to_string(Application.spec(:oban, :vsn)), ">= 2.24.0") do
+      assert row.attempt == 0
+      assert row.max_attempts == 3
+    else
+      assert row.attempt == 1
+      assert row.max_attempts == 4
+    end
   end
 
   test "handle_error/3 reads the rail-stop session_id and enqueues one bounded resume job" do
