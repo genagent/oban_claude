@@ -38,7 +38,7 @@ jobs:
       # Check out the released tag, not the triggering sha: release-please tags
       # the release-PR merge commit, which is not necessarily the commit that
       # triggered this run, so the tarball must come from the tag.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
 
