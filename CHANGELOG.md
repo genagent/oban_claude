@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.2](https://github.com/genagent/oban_claude/compare/v0.9.1...v0.9.2) (2026-10-01)
+
+
+### Bug Fixes
+
+* account for Oban 2.24 snooze semantics ([#164](https://github.com/genagent/oban_claude/issues/164)) ([7883c03](https://github.com/genagent/oban_claude/commit/7883c03be686ef02b2955fd14a52c6e9d8bb7571))
+
 ## [0.9.1](https://github.com/genagent/oban_claude/compare/v0.9.0...v0.9.1) (2026-09-29)
 
 
