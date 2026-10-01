@@ -2,7 +2,10 @@
   "packages": {
     ".": {
       "release-type": "elixir",
-      "bump-minor-pre-major": true
+      "bump-minor-pre-major": true,
+      "extra-files": [
+        "README.md"
+      ]
     }
   }
 }
