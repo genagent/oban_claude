@@ -22,7 +22,7 @@ jobs:
           otp-version: "29"
           elixir-version: "1.20"
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             deps
@@ -33,7 +33,7 @@ jobs:
 
       # Dialyzer's PLT is expensive to build; cache it keyed on the toolchain and
       # deps so it only rebuilds when those change.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: priv/plts
           key: ${{ runner.os }}-plt-otp29-elixir1.20-${{ hashFiles('mix.lock') }}
