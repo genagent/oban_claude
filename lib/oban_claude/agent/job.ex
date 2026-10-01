@@ -74,8 +74,8 @@ defmodule ObanClaude.Agent.Job do
   def handle_error(oban_return, _payload, _job), do: oban_return
 
   # Will Oban re-run this job after the verdict? {:cancel, _} never; {:error, _}
-  # only with attempts left; {:snooze, _} always (and a snooze grows
-  # max_attempts, so the attempt comparison cannot misread it as final).
+  # only with attempts left; {:snooze, _} always. Oban preserves the retry
+  # budget for snoozes, whether by extending max_attempts or rolling back attempt.
   defp terminal?({:cancel, _reason}, _job), do: true
   defp terminal?({:error, _reason}, job), do: job.attempt >= job.max_attempts
   defp terminal?({:snooze, _period}, _job), do: false

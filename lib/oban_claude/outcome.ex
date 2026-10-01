@@ -20,8 +20,8 @@ defmodule ObanClaude.Outcome do
 
   ## The default mapping never snoozes
 
-  Oban implements `{:snooze, n}` by *incrementing* `max_attempts` (the engine's
-  snooze bumps the attempt ceiling), so a snooze never consumes an attempt. A job
+  Oban implements `{:snooze, n}` without consuming an attempt: Oban 2.23
+  increments `max_attempts`, while 2.24 rolls back `attempt`. A job
   that deterministically fails the same way -- a run that always exceeds its
   `:timeout`, a permanently rate-limited key -- would therefore snooze
   **forever**: unbounded paid re-runs, no dead-letter, no operator signal. So
