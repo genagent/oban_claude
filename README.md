@@ -35,7 +35,7 @@ end
 - **Elixir `~> 1.20`** on **OTP 29**.
 - The **`claude` CLI, installed and authenticated** -- `oban_claude` shells out
   to it via [`claude_wrapper`](https://hex.pm/packages/claude_wrapper) (pinned to
-  the `0.14.x` line). Run `claude doctor` before your first real job; without a
+  the `0.15.x` line). Run `claude doctor` before your first real job; without a
   working CLI, runs dead-letter as `{:cancel, :binary_not_found}` or
   `{:cancel, :auth}`.
 

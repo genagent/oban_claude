@@ -38,10 +38,25 @@ defmodule ObanClaude.Agent.Job do
       end
   """
 
+  alias ObanClaude.Agent.Execution
+
   use ObanClaude.Worker, queue: :agents, max_attempts: 1
 
+  @doc false
+  def session_observer(%Oban.Job{meta: %{"agent_id" => id}} = job) do
+    if Process.whereis(ObanClaude.Agent.Registry) do
+      case ObanClaude.Agent.job_started(id, job) do
+        {:ok, observer} -> observer
+        {:error, _reason} -> nil
+      end
+    end
+  end
+
+  def session_observer(_job), do: nil
+
   @impl ObanClaude.Worker
-  def handle_result(result, %Oban.Job{meta: %{"agent_id" => agent_id} = meta}) do
+  def handle_result(result, %Oban.Job{meta: %{"agent_id" => agent_id}} = job) do
+    meta = Execution.job_meta(job)
     ObanClaude.Agent.job_finished(agent_id, {:ok, result}, meta)
     :ok
   end
@@ -52,8 +67,10 @@ defmodule ObanClaude.Agent.Job do
   def handle_error(
         oban_return,
         payload,
-        %Oban.Job{meta: %{"agent_id" => agent_id} = meta} = job
+        %Oban.Job{meta: %{"agent_id" => agent_id}} = job
       ) do
+    meta = Execution.job_meta(job)
+
     if terminal?(oban_return, job) do
       ObanClaude.Agent.job_finished(agent_id, {:error, oban_return, payload}, meta)
     else

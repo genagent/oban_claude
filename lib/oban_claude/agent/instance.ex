@@ -72,7 +72,7 @@ defmodule ObanClaude.Agent.Instance do
   @behaviour :gen_statem
 
   alias ClaudeWrapper.Result
-  alias ObanClaude.Agent.SessionArcs
+  alias ObanClaude.Agent.{Execution, SessionArcs}
 
   require Logger
 
@@ -188,6 +188,30 @@ defmodule ObanClaude.Agent.Instance do
   # ---------------------------------------------------------------------------
   # any state: introspection and the emergency brake
   # ---------------------------------------------------------------------------
+
+  defp process_event(state, {:call, {caller, _tag} = from}, {:job_started, meta}, data) do
+    with :ok <- identity_status(data, meta),
+         true <- state in [:running, :paused, :idle],
+         {:ok, execution} <- Execution.start(data.current_turn, meta, caller) do
+      turn = %{data.current_turn | execution: execution}
+      data = %{data | current_turn: turn}
+      emit_execution(data, :execution_started, %{})
+      {:keep_state, data, [{:reply, from, {:ok, {self(), execution.reference}}}]}
+    else
+      false -> {:keep_state_and_data, [{:reply, from, {:error, :control_disabled}}]}
+      {:error, reason} -> {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
+    end
+  end
+
+  defp process_event(
+         _state,
+         :info,
+         {reference, %ClaudeWrapper.SessionObservation{} = observation},
+         data
+       )
+       when is_reference(reference) do
+    accept_observation(data, reference, observation)
+  end
 
   defp process_event(_state, {:call, from}, :history, data) do
     {:keep_state_and_data, [{:reply, from, {:ok, Enum.reverse(data.history)}}]}
@@ -542,8 +566,14 @@ defmodule ObanClaude.Agent.Instance do
       |> Map.put("prompt", prompt)
 
     case prepare_turn(data, base_args, turn_id) do
-      {:ok, continuation} ->
-        current_turn = %{id: turn_id, retry_watermark: 0, continuation: continuation}
+      {:ok, continuation, job} ->
+        current_turn = %{
+          id: turn_id,
+          job_id: if(is_struct(job, Oban.Job), do: job.id),
+          execution: nil,
+          retry_watermark: 0,
+          continuation: continuation
+        }
 
         data =
           data
@@ -573,8 +603,8 @@ defmodule ObanClaude.Agent.Instance do
   defp prepare_turn(data, base_args, turn_id) do
     with {:ok, continuation, args} <- continuation_args(data, base_args),
          continuation <- identify_continuation(data, continuation, turn_id),
-         {:ok, _job} <- enqueue(data, args, turn_id, continuation) do
-      {:ok, continuation}
+         {:ok, job} <- enqueue(data, args, turn_id, continuation) do
+      {:ok, continuation, job}
     else
       {:error, reason} -> {:error, reason}
       _unexpected -> {:error, :unexpected_turn_start_result}
@@ -819,7 +849,7 @@ defmodule ObanClaude.Agent.Instance do
   defp persisted_job?(job), do: is_integer(Map.get(job, :id))
 
   defp correlated_finish(state, data, payload, meta) do
-    case identity_status(data, meta) do
+    case callback_status(data, meta) do
       :ok when state == :running ->
         finish_turn(data, payload)
 
@@ -838,11 +868,16 @@ defmodule ObanClaude.Agent.Instance do
   defp correlated_retry(data, retry, meta), do: correlated_retry(:running, data, retry, meta)
 
   defp correlated_retry(state, data, retry, meta) do
-    with :ok <- identity_status(data, meta),
+    with :ok <- callback_status(data, meta),
          :running <- state,
          {:ok, watermark} <- retry_watermark(retry, meta),
          true <- watermark > data.current_turn.retry_watermark do
-      current_turn = %{data.current_turn | retry_watermark: watermark}
+      current_turn = %{
+        data.current_turn
+        | retry_watermark: watermark,
+          execution: Execution.close(data.current_turn.execution)
+      }
+
       data = %{record(data, {:retrying, retry}) | current_turn: current_turn}
       {:keep_state, data, [watchdog(data)]}
     else
@@ -855,6 +890,62 @@ defmodule ObanClaude.Agent.Instance do
       other_state when is_atom(other_state) ->
         {:keep_state, reject_callback(data, :retrying, meta, {:control_disabled, other_state})}
     end
+  end
+
+  defp callback_status(data, meta) do
+    with :ok <- identity_status(data, meta),
+         do: Execution.callback_status(data.current_turn, meta)
+  end
+
+  defp accept_observation(%{current_turn: nil} = data, _reference, _observation),
+    do: {:keep_state, data}
+
+  defp accept_observation(data, reference, observation) do
+    turn = data.current_turn
+
+    case Execution.observe(turn.execution, reference, observation) do
+      {:ok, execution} -> retain_observation(data, execution)
+      _ignored -> {:keep_state, data}
+    end
+  end
+
+  defp retain_observation(data, execution) do
+    turn = data.current_turn
+    continuation = turn.continuation
+
+    if continuation.fork_from_arc_id && execution.session_id == continuation.session_id do
+      {:keep_state, data}
+    else
+      turn = %{turn | execution: execution}
+      arcs = SessionArcs.put(data.arcs, continuation.arc_id, execution.session_id)
+      data = %{data | current_turn: turn, arcs: arcs}
+      emit_execution(data, :session_observed, Map.take(execution, [:session_id, :source]))
+      {:keep_state, data}
+    end
+  end
+
+  defp emit_execution(data, event, extra) do
+    continuation = data.current_turn.continuation
+
+    metadata =
+      %{
+        agent_id: data.id,
+        agent_generation: data.generation,
+        agent_turn_id: data.current_turn.id,
+        arc_id: continuation.arc_id,
+        correlation_id: continuation.correlation_id,
+        continuation_decision: continuation.decision,
+        continuation_reason: continuation.reason
+      }
+      |> Map.merge(Execution.metadata(data.current_turn.execution))
+      |> Map.merge(extra)
+      |> maybe_put_meta(:config_revision, data.config.config_revision)
+
+    :telemetry.execute(
+      [:oban_claude, :agent, event],
+      %{system_time: System.system_time()},
+      metadata
+    )
   end
 
   defp retry_watermark(%{attempt: attempt}, meta) when is_integer(attempt) and attempt > 0 do
@@ -1144,7 +1235,7 @@ defmodule ObanClaude.Agent.Instance do
       fork_from_arc_id: data.fork_from_arc_id
     )
     |> then(&identify_continuation(data, &1, turn_id))
-    |> Map.merge(%{outcome: outcome, outcome_reason: reason})
+    |> Map.merge(%{outcome: outcome, outcome_reason: reason, execution_state: :not_started})
   end
 
   defp identify_continuation(data, continuation, turn_id) do
@@ -1173,20 +1264,56 @@ defmodule ObanClaude.Agent.Instance do
   defp failure_reason(_data, _session_id), do: :session_available
 
   defp complete_turn(data, payload) do
-    data = absorb(data, payload)
+    previous_arcs = data.arcs
+    data = data |> absorb(payload) |> retain_completed_session(payload, previous_arcs)
     continuation = completed_continuation(data, payload)
+    continuation = Map.merge(continuation, Execution.metadata(data.current_turn.execution))
     emit_completion(data, continuation)
     %{data | last_continuation: continuation}
   end
+
+  defp retain_completed_session(data, payload, previous_arcs) do
+    continuation = data.current_turn.continuation
+
+    case completion_outcome(payload) do
+      {:session_rejected, _reason} ->
+        rejected_arc = continuation.fork_from_arc_id || continuation.arc_id
+        %{data | arcs: SessionArcs.clear(previous_arcs, rejected_arc)}
+
+      {:failed, _reason} when is_binary(continuation.fork_from_arc_id) ->
+        data = %{data | arcs: previous_arcs}
+        restore_observed_session(data, data.current_turn.execution)
+
+      _other ->
+        restore_observed_session(data, data.current_turn.execution)
+    end
+  end
+
+  defp restore_observed_session(data, %{session_id: id}) when is_binary(id) do
+    arc_id = data.current_turn.continuation.arc_id
+    %{data | arcs: SessionArcs.put(data.arcs, arc_id, id)}
+  end
+
+  defp restore_observed_session(data, _execution), do: data
 
   defp complete_watchdog(data) do
     continuation =
       data.current_turn.continuation
-      |> Map.merge(%{outcome: :timed_out, outcome_reason: :watchdog_timeout})
+      |> Map.merge(%{
+        outcome: :timed_out,
+        outcome_reason: :watchdog_timeout,
+        result_session_id: SessionArcs.session(data.arcs, data.current_turn.continuation.arc_id)
+      })
+
+    continuation =
+      Map.merge(continuation, watchdog_execution_metadata(data.current_turn.execution))
 
     emit_completion(data, continuation)
     %{data | last_continuation: continuation}
   end
+
+  defp watchdog_execution_metadata(nil), do: %{execution_state: :not_started}
+  defp watchdog_execution_metadata(execution), do: Execution.metadata(execution)
 
   defp completed_continuation(data, payload) do
     {outcome, reason} = completion_outcome(payload)
@@ -1230,18 +1357,45 @@ defmodule ObanClaude.Agent.Instance do
         agent_turn_id: continuation.agent_turn_id,
         arc_id: continuation.arc_id,
         correlation_id: continuation.correlation_id,
-        session_id: continuation.result_session_id || continuation.session_id,
+        session_id: completion_session_id(continuation),
         continuation_decision: continuation.decision,
         continuation_reason: continuation.reason,
         outcome: continuation.outcome,
         outcome_reason: continuation.outcome_reason
       }
+      |> Map.merge(
+        Map.take(continuation, [:execution_state, :job_id, :job_attempt, :job_snoozed])
+      )
+      |> Map.merge(rejection_metadata(continuation))
+      |> maybe_put_meta(:fork_from_arc_id, continuation.fork_from_arc_id)
       |> maybe_put_meta(:config_revision, data.config.config_revision)
     )
   end
 
-  defp current_or_last_continuation(%{current_turn: %{continuation: continuation}}),
-    do: continuation
+  defp completion_session_id(%{outcome: :session_rejected, fork_from_arc_id: nil}), do: nil
+
+  defp completion_session_id(%{fork_from_arc_id: id} = continuation) when is_binary(id),
+    do: continuation.result_session_id
+
+  defp completion_session_id(continuation),
+    do: continuation.result_session_id || continuation.session_id
+
+  defp rejection_metadata(%{outcome: :session_rejected} = continuation) do
+    %{
+      rejected_arc_id: continuation.fork_from_arc_id || continuation.arc_id,
+      rejected_session_id: continuation.session_id || continuation.result_session_id
+    }
+  end
+
+  defp rejection_metadata(_continuation), do: %{}
+
+  defp current_or_last_continuation(%{current_turn: turn}) when not is_nil(turn),
+    do: Execution.public_continuation(turn.continuation, turn.execution)
+
+  defp current_or_last_continuation(%{
+         last_continuation: %{execution_state: :started} = continuation
+       }),
+       do: Map.put(continuation, :session_id, completion_session_id(continuation))
 
   defp current_or_last_continuation(data), do: data.last_continuation
 

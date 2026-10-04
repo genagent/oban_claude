@@ -197,7 +197,13 @@ defmodule ObanClaude do
     classifier = Keyword.get(opts, :classifier, &ObanClaude.Outcome.classify/1)
     query_fun = Keyword.get(opts, :query_fun, &ClaudeWrapper.query/2)
     job = Keyword.get(opts, :job)
+    observer = ObanClaude.Agent.Job.session_observer(job)
     {prompt, query_opts} = build(args)
+
+    query_opts =
+      if observer && not Keyword.has_key?(opts, :query_fun) && observed_runner?(),
+        do: Keyword.put(query_opts, :session_observer, observer),
+        else: query_opts
 
     start = System.monotonic_time()
     emit_start(args, job)
@@ -205,6 +211,11 @@ defmodule ObanClaude do
     emit(outcome, start, args, job)
 
     outcome |> classifier.() |> validate_classified!(classifier)
+  end
+
+  defp observed_runner? do
+    runner = ClaudeWrapper.Runner.impl()
+    Code.ensure_loaded?(runner) and function_exported?(runner, :run_observed, 5)
   end
 
   @doc """

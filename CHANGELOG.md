@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Retain early native session observations under exact Agent execution ownership,
+  including retry/snooze fencing and accepted telemetry for host persistence.
+
+
 ## [0.9.2](https://github.com/genagent/oban_claude/compare/v0.9.1...v0.9.2) (2026-10-01)
 
 

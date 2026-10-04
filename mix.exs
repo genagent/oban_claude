@@ -58,14 +58,9 @@ defmodule ObanClaude.MixProject do
   defp deps do
     [
       {:oban, "~> 2.23"},
-      # The seam onto `claude -p`: a typed Result/Error and query/2. Pinned to
-      # the 0.14.x line: this library hardcodes the wrapper contract (the
-      # @passthrough keys, the permission_mode/effort/hermetic vocabularies, and
-      # the Outcome error kinds), and claude_wrapper has shipped breaking changes
-      # in 0.x minors -- bump deliberately, re-verifying those lists per release.
-      # (0.14.0's breaking changes are all in Commands.*/Bundled/DuplexSession,
-      # none of which this library consumes; query/2 + Result/Error are unchanged.)
-      {:claude_wrapper, "~> 0.14.0"},
+      # The observed API and current Forcola compatibility require 0.15.1. Keep the wrapper
+      # contract on a deliberate minor line and recheck its option vocabulary.
+      {:claude_wrapper, "~> 0.15.1"},
       # Schema for `ObanClaude.Args`: validates the builder's options and
       # generates their documentation from a single source of truth.
       {:nimble_options, "~> 1.1"},
