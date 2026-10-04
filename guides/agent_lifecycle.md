@@ -347,3 +347,52 @@ notifications, dashboards, and MCP surfaces for agents-driving-agents are
 all **application concerns** -- they compose cleanly on top of the telemetry
 and the facade (each was built and live-proven in a demo app during this
 layer's incubation), and they carry dependencies this library should not.
+
+
+## Early native session observations
+
+Early observations require a runner implementing the wrapper's
+`run_observed/5` contract, such as its Forcola runner. The default Port runner
+continues using legacy one-shot execution and retains terminal session handles.
+Execution ownership and terminal fencing apply with either runner.
+
+The default worker registers an execution before validating its arguments or
+calling the wrapper. `execution_started` identifies an accepted worker attempt;
+it does not claim that the CLI spawned. Invalid arguments therefore complete
+the same accepted attempt with the existing cancellation behavior. The
+Agent checks the job id, process generation, logical turn, arc, attempt and
+Oban snooze counter, then supplies a local PID/reference observer. That
+observer never enters persisted job arguments or metadata. Custom `query_fun/2`
+functions retain their existing keyword contract; they can still complete
+through the normal worker callbacks without producing early observations.
+
+The owning Agent emits `[:oban_claude, :agent, :execution_started]` before
+`[:oban_claude, :agent, :session_observed]`. Both events and the corresponding
+`turn_completed` event carry `agent_id`, `agent_generation`, `agent_turn_id`,
+`arc_id`, `job_id`, `job_attempt`, `job_snoozed`, and `execution_state: :started`.
+Configuration revision, correlation and continuation decision metadata remain
+available. Session observations add `session_id` and `source` (`:system_init`).
+These events are emitted synchronously by the owning Agent, in acceptance
+order. A host can persist the started tuple and accept only matching later
+events without calling back into the Agent from a telemetry handler.
+
+`ObanClaude.Agent.info/1` exposes the registered execution tuple in `continuation` and
+sets its `session_id` only after that execution's accepted observation. A
+first accepted handle wins; duplicate or conflicting observations and old
+references are ignored. Retrying closes the old observer and a new attempt
+must advance the attempt plus snooze watermark. Late terminal callbacks are
+also fenced by the captured job tuple and worker process.
+
+Observation is evidence that the CLI created or resumed a session, not that
+work completed. Failure, cancellation, pause and watchdog expiry retain the
+observed handle. An explicit typed session rejection clears the rejected arc;
+completion includes `rejected_arc_id` and `rejected_session_id`. A rejected
+fork source cannot erase an unrelated target, and only an observed new child
+handle can replace the target on an interrupted fork.
+
+A failed enqueue or a watchdog timeout before any worker registered emits
+`execution_state: :not_started` with no job tuple.
+Legacy/custom callbacks without registered execution omit all new execution
+fields. Tick admission, approval gates and deliberate fresh-session requests
+are unchanged. Durable storage, configuration compatibility and restart
+recovery remain the host application's responsibility.
