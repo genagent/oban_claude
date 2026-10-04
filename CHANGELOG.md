@@ -6,6 +6,13 @@
   including retry/snooze fencing and accepted telemetry for host persistence.
 
 
+## [0.10.0](https://github.com/genagent/oban_claude/compare/v0.9.2...v0.10.0) (2026-10-04)
+
+
+### Features
+
+* retain early session observations (closes [#166](https://github.com/genagent/oban_claude/issues/166)) ([#167](https://github.com/genagent/oban_claude/issues/167)) ([7f09e87](https://github.com/genagent/oban_claude/commit/7f09e87bfddf45b0f6a75cda787670152754db16))
+
 ## [0.9.2](https://github.com/genagent/oban_claude/compare/v0.9.1...v0.9.2) (2026-10-01)
 
 
