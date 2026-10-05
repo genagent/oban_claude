@@ -6,6 +6,13 @@
   including retry/snooze fencing and accepted telemetry for host persistence.
 
 
+## [0.10.1](https://github.com/genagent/oban_claude/compare/v0.10.0...v0.10.1) (2026-10-05)
+
+
+### Bug Fixes
+
+* include observed rate limits in Claude run telemetry ([#169](https://github.com/genagent/oban_claude/issues/169)) ([#170](https://github.com/genagent/oban_claude/issues/170)) ([5b47d57](https://github.com/genagent/oban_claude/commit/5b47d573b7deda86604a86033dd3f60d425c1ae8))
+
 ## [0.10.0](https://github.com/genagent/oban_claude/compare/v0.9.2...v0.10.0) (2026-10-04)
 
 
