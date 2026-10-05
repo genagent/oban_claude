@@ -2,9 +2,12 @@ defmodule ObanClaude.AgentObservationTest do
   use ExUnit.Case, async: false
 
   import ObanClaude.Testing
-  alias ClaudeWrapper.SessionObservation
+  alias ClaudeWrapper.{RateLimitObservation, SessionObservation}
   alias ObanClaude.Agent
   alias ObanClaude.Agent.Job
+
+  def forward_run_metadata(_name, _measurements, metadata, {pid, tag}),
+    do: send(pid, {tag, metadata})
 
   defmodule ObservedRunner do
     @behaviour ClaudeWrapper.Runner
@@ -18,7 +21,26 @@ defmodule ObanClaude.AgentObservationTest do
     @impl true
     def run_observed(_binary, args, _opts, _timeout, observe) do
       init = Jason.encode!(%{type: "system", subtype: "init", session_id: "live-early"})
-      :observed = observe.(init)
+
+      next_observer =
+        case observe.(init) do
+          {:continue, next_observer} -> next_observer
+          :continue -> observe
+        end
+
+      rate_limit =
+        Jason.encode!(%{
+          type: "rate_limit_event",
+          rate_limit_info: %{
+            status: "allowed",
+            rateLimitType: "five_hour",
+            unifiedWindows: %{
+              five_hour: %{utilization: 0.31, resetsAt: 1_790_000_000}
+            }
+          }
+        })
+
+      :continue = next_observer.(rate_limit)
 
       send(
         Application.fetch_env!(:oban_claude, :observation_test_pid),
@@ -37,7 +59,10 @@ defmodule ObanClaude.AgentObservationTest do
               total_cost_usd: 0.0
             })
 
-          {:ok, {init <> "\n" <> terminal <> "\n", 0, ""}}
+          case Application.get_env(:oban_claude, :observation_test_outcome) do
+            :timeout -> {:error, :timeout}
+            _ -> {:ok, {init <> "\n" <> rate_limit <> "\n" <> terminal <> "\n", 0, ""}}
+          end
       end
     end
   end
@@ -99,8 +124,19 @@ defmodule ObanClaude.AgentObservationTest do
     previous = Application.get_env(:claude_wrapper, :runner)
     Application.put_env(:claude_wrapper, :runner, ObservedRunner)
     Application.put_env(:oban_claude, :observation_test_pid, self())
+    telemetry_id = "rate-limit-stop-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        telemetry_id,
+        [:oban_claude, :run, :stop],
+        &__MODULE__.forward_run_metadata/4,
+        {self(), :run_stop}
+      )
 
     on_exit(fn ->
+      :telemetry.detach(telemetry_id)
+
       if previous,
         do: Application.put_env(:claude_wrapper, :runner, previous),
         else: Application.delete_env(:claude_wrapper, :runner)
@@ -118,8 +154,58 @@ defmodule ObanClaude.AgentObservationTest do
     assert Task.yield(task, 0) == nil
     send(runner, :finish)
     assert Task.await(task) == :ok
+
+    assert_receive {:run_stop,
+                    %{
+                      rate_limit_observations: [
+                        %RateLimitObservation{
+                          status: "allowed",
+                          rate_limit_type: "five_hour"
+                        }
+                      ]
+                    }}
+
     assert {:ok, :idle} = Agent.await(id, :idle, 1_000)
     assert_receive {:turn_completed, %{session_id: "live-early", job_id: ^job_id}}
+  end
+
+  test "an observed rate limit survives a wrapper timeout in exception telemetry" do
+    previous = Application.get_env(:claude_wrapper, :runner)
+    Application.put_env(:claude_wrapper, :runner, ObservedRunner)
+    Application.put_env(:oban_claude, :observation_test_pid, self())
+    Application.put_env(:oban_claude, :observation_test_outcome, :timeout)
+    telemetry_id = "rate-limit-timeout-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        telemetry_id,
+        [:oban_claude, :run, :exception],
+        &__MODULE__.forward_run_metadata/4,
+        {self(), :run_exception}
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(telemetry_id)
+
+      if previous,
+        do: Application.put_env(:claude_wrapper, :runner, previous),
+        else: Application.delete_env(:claude_wrapper, :runner)
+
+      Application.delete_env(:oban_claude, :observation_test_pid)
+      Application.delete_env(:oban_claude, :observation_test_outcome)
+    end)
+
+    task = Task.async(fn -> ObanClaude.run(%{"prompt" => "work"}) end)
+    assert_receive {:runner_blocked, runner, _args}
+    send(runner, :finish)
+    assert {{:error, :timeout}, %ClaudeWrapper.Error{kind: :timeout}} = Task.await(task)
+
+    assert_receive {:run_exception,
+                    %{
+                      rate_limit_observations: [
+                        %RateLimitObservation{status: "allowed"}
+                      ]
+                    }}
   end
 
   test "retains the first accepted session before completion and fences public metadata" do
@@ -415,6 +501,7 @@ defmodule ObanClaude.AgentObservationTest do
     assert {:ok, _} = ObanClaude.run(job.args, job: job, query_fun: query)
     assert_receive {:query_opts, opts}
     refute Keyword.has_key?(opts, :session_observer)
+    refute Keyword.has_key?(opts, :rate_limit_observer)
     assert_receive {:execution_started, _}
     :ok = Job.handle_result(result("done"), job)
     assert {:ok, :idle} = Agent.await(id, :idle, 1_000)

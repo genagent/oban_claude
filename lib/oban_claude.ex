@@ -52,6 +52,11 @@ defmodule ObanClaude do
         result carries no cost)
     * Metadata:
       * `:result` -- the `%ClaudeWrapper.Result{}` struct
+      * `:rate_limit_observations` -- ordered typed
+        `%ClaudeWrapper.RateLimitObservation{}` values from this invocation;
+        `[]` when the default query did not use an observed runner or no valid
+        rate-limit event arrived. These are provider-reported observations,
+        not a durable availability decision.
       * `:args` -- the string-keyed args map passed to `run/2`
       * `:job` -- a slim map `%{id, queue, worker, attempt, max_attempts, meta}`
         for the `Oban.Job`, or `nil` when `run/2` was called without `:job`
@@ -71,6 +76,8 @@ defmodule ObanClaude do
     * Metadata:
       * `:error` -- the `%ClaudeWrapper.Error{}` struct, or the raw error term on
         the off-contract path
+      * `:rate_limit_observations` -- any events observed before failure or
+        timeout, with the same meaning as on `:stop`
       * `:args` -- the string-keyed args map passed to `run/2`
       * `:job` -- as above
 
@@ -81,7 +88,7 @@ defmodule ObanClaude do
   > telemetry to a log aggregator.
   """
 
-  alias ClaudeWrapper.{Error, Result}
+  alias ClaudeWrapper.{Error, RateLimitObservation, Result}
 
   @typedoc """
   An `c:Oban.Worker.perform/1` return value. `:snooze` accepts Oban's full
@@ -199,16 +206,23 @@ defmodule ObanClaude do
     job = Keyword.get(opts, :job)
     observer = ObanClaude.Agent.Job.session_observer(job)
     {prompt, query_opts} = build(args)
+    observed? = not Keyword.has_key?(opts, :query_fun) and observed_runner?()
+    rate_limit_reference = if observed?, do: make_ref(), else: nil
 
     query_opts =
-      if observer && not Keyword.has_key?(opts, :query_fun) && observed_runner?(),
-        do: Keyword.put(query_opts, :session_observer, observer),
-        else: query_opts
+      if observed? do
+        query_opts
+        |> Keyword.put(:rate_limit_observer, {self(), rate_limit_reference})
+        |> maybe_put_session_observer(observer)
+      else
+        query_opts
+      end
 
     start = System.monotonic_time()
     emit_start(args, job)
     outcome = query_fun.(prompt, query_opts)
-    emit(outcome, start, args, job)
+    rate_limit_observations = collect_rate_limit_observations(rate_limit_reference)
+    emit(outcome, start, args, job, rate_limit_observations)
 
     outcome |> classifier.() |> validate_classified!(classifier)
   end
@@ -216,6 +230,25 @@ defmodule ObanClaude do
   defp observed_runner? do
     runner = ClaudeWrapper.Runner.impl()
     Code.ensure_loaded?(runner) and function_exported?(runner, :run_observed, 5)
+  end
+
+  defp maybe_put_session_observer(query_opts, nil), do: query_opts
+
+  defp maybe_put_session_observer(query_opts, observer),
+    do: Keyword.put(query_opts, :session_observer, observer)
+
+  defp collect_rate_limit_observations(nil), do: []
+
+  defp collect_rate_limit_observations(reference),
+    do: collect_rate_limit_observations(reference, [])
+
+  defp collect_rate_limit_observations(reference, observations) do
+    receive do
+      {^reference, %RateLimitObservation{} = observation} ->
+        collect_rate_limit_observations(reference, [observation | observations])
+    after
+      0 -> Enum.reverse(observations)
+    end
   end
 
   @doc """
@@ -355,19 +388,29 @@ defmodule ObanClaude do
     )
   end
 
-  defp emit({:ok, %Result{} = r}, start, args, job) do
+  defp emit({:ok, %Result{} = r}, start, args, job, rate_limit_observations) do
     :telemetry.execute(
       [:oban_claude, :run, :stop],
       %{duration: System.monotonic_time() - start, cost_usd: r.cost_usd || 0.0},
-      %{result: r, args: args, job: job_meta(job)}
+      %{
+        result: r,
+        args: args,
+        job: job_meta(job),
+        rate_limit_observations: rate_limit_observations
+      }
     )
   end
 
-  defp emit({:error, %Error{} = e}, start, args, job) do
+  defp emit({:error, %Error{} = e}, start, args, job, rate_limit_observations) do
     :telemetry.execute(
       [:oban_claude, :run, :exception],
       %{duration: System.monotonic_time() - start, cost_usd: error_cost(e)},
-      %{error: e, args: args, job: job_meta(job)}
+      %{
+        error: e,
+        args: args,
+        job: job_meta(job),
+        rate_limit_observations: rate_limit_observations
+      }
     )
   end
 
@@ -375,16 +418,21 @@ defmodule ObanClaude do
   # the classifier, so it must still surface to telemetry. Emit :exception with
   # the raw term as `:error` (measurements carry no cost -- there is no typed
   # result to read one from).
-  defp emit({:error, other}, start, args, job) do
+  defp emit({:error, other}, start, args, job, rate_limit_observations) do
     :telemetry.execute(
       [:oban_claude, :run, :exception],
       %{duration: System.monotonic_time() - start, cost_usd: 0.0},
-      %{error: other, args: args, job: job_meta(job)}
+      %{
+        error: other,
+        args: args,
+        job: job_meta(job),
+        rate_limit_observations: rate_limit_observations
+      }
     )
   end
 
   # Telemetry must never crash the run: ignore anything else off the typed contract.
-  defp emit(_outcome, _start, _args, _job), do: :ok
+  defp emit(_outcome, _start, _args, _job, _rate_limit_observations), do: :ok
 
   # A slim, cost-attribution-oriented view of the job for telemetry metadata.
   # `nil` for bare `run/2` callers that pass no `:job`.

@@ -58,9 +58,9 @@ defmodule ObanClaude.MixProject do
   defp deps do
     [
       {:oban, "~> 2.23"},
-      # The observed API and current Forcola compatibility require 0.15.1. Keep the wrapper
-      # contract on a deliberate minor line and recheck its option vocabulary.
-      {:claude_wrapper, "~> 0.15.1"},
+      # Typed rate-limit observations require 0.15.2. Keep the wrapper contract
+      # on a deliberate minor line and recheck its option vocabulary.
+      {:claude_wrapper, "~> 0.15.2"},
       # Schema for `ObanClaude.Args`: validates the builder's options and
       # generates their documentation from a single source of truth.
       {:nimble_options, "~> 1.1"},
