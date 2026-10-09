@@ -175,6 +175,10 @@ defmodule ObanClaude.Agent do
     * `:arc_id` -- an opaque non-empty string naming the provider conversation;
       defaults to `"default"`. Arcs isolate their session handles while the
       agent remains single-turn-at-a-time.
+    * `:resume_session_id` -- an exact host-retained handle for `:resume` when
+      this arc has been evicted from the bounded cache. It is admitted at turn
+      delivery, not call time. A different live handle for the arc is refused
+      rather than overwritten. Do not use for a fresh turn or a fork.
     * `:origin` -- `:operator` (default) or `:tick`. A `:tick` prompt is a
       scheduled delivery: in `:waiting_for_user` it queues behind the pending
       question instead of being consumed as the answer.
@@ -431,6 +435,7 @@ defmodule ObanClaude.Agent do
     arc_id = Keyword.get(opts, :arc_id)
     fork_from = Keyword.get(opts, :fork_from)
     correlation_id = Keyword.get(opts, :correlation_id)
+    resume_session_id = Keyword.get(opts, :resume_session_id)
 
     unless session in [:resume, :fresh, :fresh_fallback] do
       raise ArgumentError,
@@ -444,13 +449,19 @@ defmodule ObanClaude.Agent do
     validate_arc_id!(:arc_id, arc_id)
     validate_arc_id!(:fork_from, fork_from)
     validate_correlation_id!(correlation_id)
+    validate_arc_id!(:resume_session_id, resume_session_id)
+
+    if resume_session_id && (session != :resume || fork_from) do
+      raise ArgumentError, ":resume_session_id requires :session to be :resume without :fork_from"
+    end
 
     %{
       session: session,
       origin: origin,
       arc_id: arc_id,
       fork_from: fork_from,
-      correlation_id: correlation_id
+      correlation_id: correlation_id,
+      resume_session_id: resume_session_id
     }
   end
 

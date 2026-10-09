@@ -222,6 +222,20 @@ Claude can branch a retained session without changing its source arc:
 The returned child session is stored under the target arc. Least-recently
 used inactive handles are evicted when `max_session_arcs` is reached. Arc
 persistence and rotation policy remain the host application's responsibility.
+If the host still has a compatible exact handle after eviction, it can supply
+it with the turn so admission and enqueue happen in one state-machine event:
+
+    ObanClaude.Agent.submit_prompt("caretaker", "operator work",
+      arc_id: "operator",
+      resume_session_id: persisted_operator_session
+    )
+
+The handle is used only when that arc is absent from the live cache. A
+different live handle returns `{:error, {:session_conflict, arc_id}}` without
+enqueuing; the host must reconcile its durable record. This does not verify
+that an evicted provider transcript still exists. A confirmed native rejection
+still requires the host's explicit recovery policy. Keep gate-bound answers on
+the arc that opened the gate.
 
 ## Retries are one logical turn
 
