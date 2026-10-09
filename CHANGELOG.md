@@ -6,6 +6,13 @@
   including retry/snooze fencing and accepted telemetry for host persistence.
 
 
+## [0.10.2](https://github.com/genagent/oban_claude/compare/v0.10.1...v0.10.2) (2026-10-09)
+
+
+### Bug Fixes
+
+* **agent:** admit exact resume handle after cache eviction ([#173](https://github.com/genagent/oban_claude/issues/173)) ([a893ac8](https://github.com/genagent/oban_claude/commit/a893ac8fe09c7aa3a71a875c97c370705f5f0083))
+
 ## [0.10.1](https://github.com/genagent/oban_claude/compare/v0.10.0...v0.10.1) (2026-10-05)
 
 
