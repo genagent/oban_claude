@@ -348,11 +348,17 @@ defmodule ObanClaude.Agent.Instance do
   # ---------------------------------------------------------------------------
 
   defp process_event(:idle, {:call, from}, {:user_prompt, text, opts}, data) do
-    start_turn(from, text, prompt_data(data, opts, "default"))
+    case prompt_data(data, opts, "default") do
+      {:ok, candidate} -> start_turn(from, text, candidate, %{}, :idle, candidate)
+      {:error, reason} -> reject_prompt(from, data, reason)
+    end
   end
 
   defp process_event(:idle, :cast, {:user_prompt, text, opts}, data) do
-    start_turn(nil, text, prompt_data(data, opts, "default"))
+    case prompt_data(data, opts, "default") do
+      {:ok, candidate} -> start_turn(nil, text, candidate, %{}, :idle, candidate)
+      {:error, reason} -> reject_prompt(nil, data, reason)
+    end
   end
 
   # A turn that completed after pause/resume, but before another prompt took
@@ -422,23 +428,33 @@ defmodule ObanClaude.Agent.Instance do
   defp process_event(:waiting_for_user, {:call, from}, {:user_prompt, answer, opts}, data) do
     question = data.pending_question
 
-    candidate =
-      %{data | pending_question: nil, gate_turn: nil}
-      |> prompt_data(opts, data.active_arc_id)
-      |> put_pause_transition(:continued, %{gate_outcome: :answered, question: question})
+    case prompt_data(data, opts, data.active_arc_id) do
+      {:ok, candidate} ->
+        candidate =
+          %{candidate | pending_question: nil, gate_turn: nil}
+          |> put_pause_transition(:continued, %{gate_outcome: :answered, question: question})
 
-    start_turn(from, answer, candidate, %{}, :waiting_for_user, data)
+        start_turn(from, answer, candidate, %{}, :waiting_for_user, data)
+
+      {:error, reason} ->
+        reject_prompt(from, data, reason)
+    end
   end
 
   defp process_event(:waiting_for_user, :cast, {:user_prompt, answer, opts}, data) do
     question = data.pending_question
 
-    candidate =
-      %{data | pending_question: nil, gate_turn: nil}
-      |> prompt_data(opts, data.active_arc_id)
-      |> put_pause_transition(:continued, %{gate_outcome: :answered, question: question})
+    case prompt_data(data, opts, data.active_arc_id) do
+      {:ok, candidate} ->
+        candidate =
+          %{candidate | pending_question: nil, gate_turn: nil}
+          |> put_pause_transition(:continued, %{gate_outcome: :answered, question: question})
 
-    start_turn(nil, answer, candidate, %{}, :waiting_for_user, data)
+        start_turn(nil, answer, candidate, %{}, :waiting_for_user, data)
+
+      {:error, reason} ->
+        reject_prompt(nil, data, reason)
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -553,9 +569,9 @@ defmodule ObanClaude.Agent.Instance do
          from,
          prompt,
          data,
-         extra_args \\ %{},
-         fallback_state \\ :idle,
-         fallback_data \\ nil
+         extra_args,
+         fallback_state,
+         fallback_data
        ) do
     fallback_data = fallback_data || data
     turn_id = identity_token()
@@ -629,33 +645,60 @@ defmodule ObanClaude.Agent.Instance do
   defp reply(nil, _message), do: []
   defp reply(from, message), do: [{:reply, from, message}]
 
+  defp reject_prompt(nil, data, reason),
+    do: {:keep_state, record(data, {:prompt_rejected, reason})}
+
+  defp reject_prompt(from, _data, reason),
+    do: {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
+
   # Freshness is applied at delivery time, so postponed prompts clear only
   # their selected arc immediately before enqueue.
   defp prompt_data(data, opts, fallback_arc_id) do
     arc_id = Map.get(opts, :arc_id) || fallback_arc_id
     request = Map.fetch!(opts, :session)
 
-    arcs =
-      case request do
-        mode when mode in [:fresh, :fresh_fallback] -> SessionArcs.clear(data.arcs, arc_id)
-        :resume -> SessionArcs.touch(data.arcs, arc_id)
-      end
+    with :ok <- guard_gate_arc(data, opts, arc_id),
+         {:ok, arcs} <- admit_arc(data.arcs, arc_id, request, Map.get(opts, :resume_session_id)) do
+      arcs =
+        case Map.get(opts, :fork_from) do
+          fork_from when is_binary(fork_from) -> SessionArcs.touch(arcs, fork_from)
+          nil -> arcs
+        end
 
-    arcs =
-      case Map.get(opts, :fork_from) do
-        fork_from when is_binary(fork_from) -> SessionArcs.touch(arcs, fork_from)
-        nil -> arcs
-      end
+      {:ok,
+       %{
+         data
+         | arcs: arcs,
+           active_arc_id: arc_id,
+           continuation_request: request,
+           fork_from_arc_id: Map.get(opts, :fork_from),
+           origin: Map.get(opts, :origin, :operator),
+           correlation_id: Map.get(opts, :correlation_id)
+       }}
+    end
+  end
 
-    %{
-      data
-      | arcs: arcs,
-        active_arc_id: arc_id,
-        continuation_request: request,
-        fork_from_arc_id: Map.get(opts, :fork_from),
-        origin: Map.get(opts, :origin, :operator),
-        correlation_id: Map.get(opts, :correlation_id)
-    }
+  defp guard_gate_arc(%{pending_question: nil}, _opts, _arc_id), do: :ok
+
+  defp guard_gate_arc(%{active_arc_id: arc_id}, %{resume_session_id: id}, arc_id)
+       when is_binary(id), do: :ok
+
+  defp guard_gate_arc(%{active_arc_id: active}, %{resume_session_id: id}, _arc_id)
+       when is_binary(id), do: {:error, {:gate_arc_conflict, active}}
+
+  defp guard_gate_arc(_data, _opts, _arc_id), do: :ok
+
+  defp admit_arc(arcs, arc_id, request, _id) when request in [:fresh, :fresh_fallback],
+    do: {:ok, SessionArcs.clear(arcs, arc_id)}
+
+  defp admit_arc(arcs, arc_id, :resume, nil), do: {:ok, SessionArcs.touch(arcs, arc_id)}
+
+  defp admit_arc(arcs, arc_id, :resume, id) do
+    case SessionArcs.session(arcs, arc_id) do
+      nil -> {:ok, SessionArcs.put(arcs, arc_id, id)}
+      ^id -> {:ok, SessionArcs.touch(arcs, arc_id)}
+      _other -> {:error, {:session_conflict, arc_id}}
+    end
   end
 
   # Route on the finished turn's structured-output directive. A completed

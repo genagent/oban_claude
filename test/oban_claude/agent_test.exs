@@ -756,9 +756,89 @@ defmodule ObanClaude.AgentTest do
 
       assert {:ok, %{session_arcs: %{"a" => "session-a", "c" => "session-c"}}} = Agent.info(id)
     end
+
+    test "a durable host handle resumes an operator arc after 32 fresh turns" do
+      id = start_agent!(session_arcs: %{"operator" => "operator-native"})
+
+      for n <- 1..32 do
+        arc_id = "sweep-#{n}"
+        session_id = "sweep-native-#{n}"
+        assert :processing = Agent.submit_prompt(id, "sweep", arc_id: arc_id, session: :fresh)
+        assert_receive {:enqueued, args, _meta}
+        refute Map.has_key?(args, "resume")
+        :ok = finish_captured(id, {:ok, result(result: "done", session_id: session_id)})
+        assert {:ok, :idle} = Agent.await(id, :idle, 1_000)
+      end
+
+      assert {:ok, %{session_arcs: arcs}} = Agent.info(id)
+      refute Map.has_key?(arcs, "operator")
+      assert map_size(arcs) == 32
+
+      assert :processing =
+               Agent.submit_prompt(id, "operator work",
+                 arc_id: "operator",
+                 resume_session_id: "operator-native"
+               )
+
+      assert_receive {:enqueued, %{"resume" => "operator-native"},
+                      %{"arc_id" => "operator", "session_id" => "operator-native"}}
+    end
+
+    test "a stale host handle cannot replace a newer live handle" do
+      id = start_agent!(session_arcs: %{"operator" => "newer-native"})
+
+      assert {:error, {:session_conflict, "operator"}} =
+               Agent.submit_prompt(id, "stale work",
+                 arc_id: "operator",
+                 resume_session_id: "older-native"
+               )
+
+      refute_receive {:enqueued, _, _}
+      assert {:ok, %{session_arcs: %{"operator" => "newer-native"}}} = Agent.info(id)
+
+      assert_raise ArgumentError, ~r/resume_session_id requires/, fn ->
+        Agent.submit_prompt(id, "fresh",
+          arc_id: "operator",
+          session: :fresh,
+          resume_session_id: "older-native"
+        )
+      end
+    end
   end
 
   describe ":waiting_for_user" do
+    test "an exact host handle cannot divert a gated answer to another arc" do
+      id = start_agent!()
+      assert :processing = Agent.submit_prompt(id, "ask", arc_id: "sweep")
+      assert_receive {:enqueued, _, _}
+
+      turn =
+        structured_result(%{"directive" => "ask_user", "question" => "which target?"},
+          session_id: "sweep-native"
+        )
+
+      :ok = finish_captured(id, {:ok, turn})
+
+      assert {:ok, {:waiting_for_user, "which target?"}} =
+               Agent.await(id, :waiting_for_user, 1_000)
+
+      assert {:error, {:gate_arc_conflict, "sweep"}} =
+               Agent.submit_prompt(id, "answer",
+                 arc_id: "operator",
+                 resume_session_id: "operator-native"
+               )
+
+      refute_receive {:enqueued, _, _}
+
+      assert {:ok, {:waiting_for_user, "which target?"}} =
+               Agent.await(id, :waiting_for_user, 1_000)
+
+      assert :processing =
+               Agent.submit_prompt(id, "answer", resume_session_id: "sweep-native")
+
+      assert_receive {:enqueued, %{"resume" => "sweep-native"}, %{"arc_id" => "sweep"}}
+    end
+
     test "an ask_user directive parks the agent; the next prompt answers and resumes" do
       id = start_agent!()
       :processing = Agent.submit_prompt(id, "deploy the service")
