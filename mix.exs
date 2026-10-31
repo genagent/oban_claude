@@ -60,7 +60,7 @@ defmodule ObanClaude.MixProject do
       {:oban, "~> 2.23"},
       # Typed rate-limit observations require 0.15.2. Keep the wrapper contract
       # on a deliberate minor line and recheck its option vocabulary.
-      {:claude_wrapper, "~> 0.15.2"},
+      {:claude_wrapper, "~> 0.17.0"},
       # Schema for `ObanClaude.Args`: validates the builder's options and
       # generates their documentation from a single source of truth.
       {:nimble_options, "~> 1.1"},
